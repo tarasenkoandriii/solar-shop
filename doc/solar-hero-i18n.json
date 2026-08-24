@@ -1,0 +1,149 @@
+{
+  "version": "1.0",
+  "asset": {
+    "filename": "solar-roof.webp",
+    "source_image_filename": "a_wide_cinematic_exterior_scene_of_a_modern_subur.png",
+    "dimensions_px": {
+      "width": 1536,
+      "height": 1024
+    },
+    "aspect_ratio": "16:9",
+    "text_embedded": false
+  },
+  "text_overlay": {
+    "font_family": "Inter, Arial, sans-serif",
+    "font_weight": {
+      "h1": 700,
+      "subtitle": 400,
+      "cta_primary": 600,
+      "cta_secondary": 600
+    },
+    "color": {
+      "h1": "#FFFFFF",
+      "subtitle": "#E8EEF2",
+      "cta_primary_text": "#FFFFFF",
+      "cta_primary_background": "#FF8A00",
+      "cta_secondary_text": "#FFFFFF",
+      "cta_secondary_border": "#FFFFFF"
+    },
+    "desktop": {
+      "content_width_percent": 40,
+      "safe_zone": {
+        "left_percent": 5,
+        "top_percent": 22,
+        "width_percent": 40,
+        "height_percent": 60
+      },
+      "blocks": {
+        "h1": {
+          "x_percent": 5,
+          "y_percent": 24,
+          "width_percent": 35,
+          "font_size_px_at_2560": 72,
+          "line_height": 1.08,
+          "text": {
+            "ua": "Сонячна енергія для вашого дому",
+            "ru": "Солнечная энергия для вашего дома",
+            "en": "Solar energy for your home"
+          }
+        },
+        "subtitle": {
+          "x_percent": 5,
+          "y_percent": 49,
+          "width_percent": 33,
+          "font_size_px_at_2560": 28,
+          "line_height": 1.35,
+          "text": {
+            "ua": "Надійні сонячні рішення для приватних будинків і бізнесу",
+            "ru": "Надёжные солнечные решения для частных домов и бизнеса",
+            "en": "Reliable solar solutions for homes and businesses"
+          }
+        },
+        "cta_group": {
+          "x_percent": 5,
+          "y_percent": 66,
+          "width_percent": 36,
+          "gap_px_at_2560": 32,
+          "button_height_px_at_2560": 72,
+          "primary": {
+            "font_size_px_at_2560": 24,
+            "text": {
+              "ua": "Перейти до каталогу",
+              "ru": "Перейти в каталог",
+              "en": "View catalog"
+            }
+          },
+          "secondary": {
+            "font_size_px_at_2560": 24,
+            "text": {
+              "ua": "Розрахувати систему",
+              "ru": "Рассчитать систему",
+              "en": "Calculate system"
+            }
+          }
+        }
+      }
+    },
+    "mobile": {
+      "recommended_source_dimensions_px": {
+        "width": 1080,
+        "height": 1440
+      },
+      "note": "Use a dedicated mobile crop/source; do not rely on an unmodified desktop object-cover crop.",
+      "text_alignment": "left",
+      "safe_zone": {
+        "left_percent": 7,
+        "top_percent": 12,
+        "width_percent": 86,
+        "height_percent": 38
+      }
+    }
+  },
+  "overlay": {
+    "desktop": {
+      "type": "linear-gradient",
+      "direction": "90deg",
+      "stops": [
+        {
+          "position_percent": 0,
+          "color": "rgba(0,0,0,0.55)"
+        },
+        {
+          "position_percent": 38,
+          "color": "rgba(0,0,0,0.30)"
+        },
+        {
+          "position_percent": 72,
+          "color": "rgba(0,0,0,0.05)"
+        },
+        {
+          "position_percent": 100,
+          "color": "rgba(0,0,0,0.00)"
+        }
+      ]
+    },
+    "mobile": {
+      "type": "vertical-diagonal",
+      "note": "Increase darkness behind the text while preserving the house and panels."
+    }
+  },
+  "localization": {
+    "languages": [
+      "ua",
+      "ru",
+      "en"
+    ],
+    "alt": {
+      "ua": "Сонячні панелі на даху приватного будинку",
+      "ru": "Солнечные панели на крыше частного дома",
+      "en": "Solar panels installed on the roof of a private home"
+    }
+  },
+  "implementation_notes": {
+    "image_format": "WebP",
+    "fallback": "JPEG",
+    "overlay_is_separate_layer": true,
+    "text_is_html_css": true,
+    "source_tz_reference": "TZ_HeroPhoto_v2_detailed.md"
+  }
+}

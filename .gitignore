@@ -1,0 +1,41 @@
+# Знайдено при зведенні .env-файлів в один кореневий — без .gitignore
+# кореневий /.env (з реальними секретами) потрапив би в git при першому ж
+# коміті. .gitignore був відсутній у проєкті взагалі (жодного файлу на
+# будь-якому рівні), не тільки для .env — додано для всього стандартного
+# набору одразу.
+
+# Секрети — НІКОЛИ не комітити
+.env
+.env.local
+.env.*.local
+apps/*/.env
+apps/*/.env.local
+
+# Залежності
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# NestJS build output
+apps/api/dist/
+
+# Prisma
+packages/db/node_modules/
+packages/db/dist/
+
+# Логи
+*.log
+npm-debug.log*
+
+# OS/редактори
+.DS_Store
+.vscode/
+.idea/
+
+# Тимчасові файли збірки
+*.tsbuildinfo
+
+# Vercel
+.vercel/

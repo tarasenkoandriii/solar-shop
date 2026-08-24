@@ -1,0 +1,32 @@
+{
+  "name": "solar-shop",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:admin": "npm run dev --workspace=apps/admin",
+    "dev:tma": "npm run dev --workspace=apps/tma",
+    "db:generate": "npm run generate --workspace=packages/db",
+    "db:build": "npm run build --workspace=packages/db",
+    "db:migrate": "npm run migrate --workspace=packages/db",
+    "db:seed": "npm run seed --workspace=packages/db",
+    "cron": "node scripts/run-cron-job.js",
+    "cron:products": "node scripts/run-cron-job.js product_parser --debug",
+    "cron:articles": "node scripts/run-cron-job.js article_parser --debug",
+    "cron:articles-poll": "node scripts/run-cron-job.js article_batch_poll --debug",
+    "cron:nova-poshta": "node scripts/run-cron-job.js nova_poshta_directory_sync --debug",
+    "cron:nbu-rate": "node scripts/run-cron-job.js nbu_rate_sync --debug",
+    "cron:promo": "node scripts/run-cron-job.js promo_recalc --debug",
+    "cron:rate-limit-cleanup": "node scripts/run-cron-job.js rate_limit_cleanup --debug",
+    "cron:financing": "node scripts/run-cron-job.js financing_program_parser --debug",
+    "cron:business-plans": "node scripts/run-cron-job.js business_plan_batch_processor --debug",
+    "cron:pvgis-grid": "node scripts/run-cron-job.js pvgis_country_grid --debug"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

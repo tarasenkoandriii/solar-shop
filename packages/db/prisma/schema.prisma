@@ -1,0 +1,1337 @@
+// Solar Shop — Фаза 2 (парсер + коммерция)
+// Расширяет схему Фазы 1 согласно ТЗ п.11 «Фаза 2»: Vendor/SourceListing/
+// ProductListing (siblings), Cart/Order/OrderItem, Article/ArticleTranslation,
+// PromoSettings, LoyaltyTier, CronJobRun, RateLimitEntry.
+//
+// ВАЖНАЯ МИГРАЦИЯ МОДЕЛИ Product: в Фазе 1 у Product были свои priceUsd/
+// images/inStock/isNew — с приходом siblings (п.13) источник истины по цене/
+// наличию/фото переезжает на SourceListing/ProductImage (см. устаревшую
+// пометку в самом ТЗ п.4 и актуальную схему п.13.1). Прямых полей цены на
+// Product больше нет — эффективная цена вычисляется как MIN(priceUsd) среди
+// listings с inStock=true (ТЗ п.13.3), это ответственность API-слоя, не БД.
+//
+// Lead из Фазы 1 остаётся ТОЛЬКО для общей формы обратной связи на /contacts
+// (ТЗ п.3.4) — сценарий "узнать цену"/"купить" на карточке товара теперь
+// полностью проходит через Cart/Order (ТЗ п.19), не через Lead.
+
+generator client {
+  provider = "prisma-client-js"
+  // Знайдено на реальному Docker-деплої (18.08.2026): без явного
+  // binaryTargets Prisma намагається автовизначити OpenSSL на етапі
+  // generate — у контейнері `node:20-alpine` це визначення провалилось
+  // ("Prisma failed to detect the libssl/openssl version... Defaulting to
+  // openssl-1.1.x") і скачало ДВИГУН під OpenSSL 1.1.x, а рантайм-образ
+  // (той самий node:20-alpine, Alpine 3.19+) реально має OpenSSL 3.x —
+  // "Error loading shared library libssl.so.1.1: No such file or
+  // directory". "native" — для генерації на хості під час розробки
+  // (macOS/Linux напряму), "linux-musl-openssl-3.0.x"/"linux-musl-arm64-
+  // openssl-3.0.x" — Alpine-контейнери цього проєкту під amd64/arm64
+  // відповідно (Mac з Apple Silicon за замовчуванням білдить arm64-образи
+  // в Docker Desktop — без arm64-варіанту рушій знову не знайшовся б).
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+// За прямим запитом користувача — "для supabase должен быть
+// DIRECT_URL для конфига ORM". Supabase дає ДВА різних підключення:
+// пул через PgBouncer (порт 6543, transaction mode) для рантайм-
+// запитів застосунку, і пряме підключення (порт 5432) для міграцій —
+// PgBouncer у transaction mode НЕ підтримує prepared statements, які
+// Prisma використовує під час `migrate`/`db push`, тому без
+// directUrl міграції з пулера просто впадуть з помилкою. DATABASE_URL
+// лишається для локальної розробки (docker-compose Postgres, розділ
+// README) — там немає пулера, обидва значення природно однакові.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- Общие enum'ы ----------
+
+enum ManufacturerRegion {
+  EUROPE
+  CHINA
+}
+
+enum UserRole {
+  CUSTOMER
+  MANAGER
+  ADMIN
+}
+
+enum LeadSource {
+  WEB
+  TMA
+}
+
+enum LeadStatus {
+  NEW
+  IN_PROGRESS
+  CLOSED
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// ============================================================
+// Категорії товарів — за прямим запитом користувача: раніше жорсткий
+// Postgres-enum ProductCategory (SOLAR_PANEL/BATTERY/CONTROLLER), тепер
+// таблиця, щоб нові категорії могли з'являтись через модерацію в
+// адмінці без деплою коду/міграції схеми (додавання значення в
+// Postgres-enum вимагало б саме цього). `Product.category`/
+// `ArticleNumberSequence.category`/`PromoSettings.category`/
+// `ScalingThreshold.category` тепер прості String-поля, що
+// (М'ЯКО, без жорсткого FK-constraint — той самий патерн, що вже
+// застосований для Vendor.name-посилань деінде в проєкті) відповідають
+// Category.key. 3 існуючі категорії засіяні (seed.ts) зі статусом
+// APPROVED — увесь наявний код, що порівнює product.category === 
+// 'SOLAR_PANEL' тощо, лишається коректним без жодних змін, бо значення
+// рядків не змінились, змінився лише СПОСІБ їх зберігання (String
+// замість enum-constraint).
+// ============================================================
+
+enum CategoryStatus {
+  PENDING // сирий rawCategory/siteCategoryLabel не відповідає жодній відомій категорії — очікує рішення адміна
+  APPROVED
+  REJECTED
+}
+
+model Category {
+  id                  String         @id @default(cuid())
+  key                 String         @unique // 'SOLAR_PANEL' / 'BATTERY' / 'CONTROLLER' / новий слаг для щойно виявленої категорії
+  nameUk              String
+  nameRu              String
+  nameEn              String
+  // Префікс артикулу ('SP'/'BAT'/'CTRL') — раніше жорстко закодований
+  // Record<ProductCategory,string> у products.service.ts, тепер тут,
+  // щоб нова категорія могла отримати свій префікс без зміни коду.
+  articleNumberPrefix String
+  status              CategoryStatus @default(APPROVED)
+  createdAt           DateTime       @default(now())
+
+  @@index([status])
+}
+
+enum VendorContractStatus {
+  NOT_CONTACTED
+  NEGOTIATING
+  SIGNED
+  DECLINED
+}
+
+enum MatchType {
+  SKU_EXACT
+  GTIN_EAN
+  FUZZY_NAME
+  GROK_LLM
+  MANUAL
+}
+
+enum OrderStatus {
+  NEW
+  INVOICED
+  PAID
+  SHIPPED
+  CANCELLED
+}
+
+enum TtnStatus {
+  NOT_CREATED
+  RESERVED
+  READY_TO_SHIP
+  SHIPPED
+  CANCELLED
+}
+
+enum ArticleStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum CronRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+// ---------- Производитель / товар / галерея / теги ----------
+
+model Manufacturer {
+  id        String             @id @default(cuid())
+  name      String
+  region    ManufacturerRegion
+  logoUrl   String?
+  country   String
+  products  Product[]
+  createdAt DateTime           @default(now())
+}
+
+model Product {
+  id               String          @id @default(cuid())
+  slug             String          @unique
+  articleNumber    String          @unique
+  manufacturerSku  String?
+  category         String
+  name             String
+  manufacturerId   String?
+  manufacturer     Manufacturer?   @relation(fields: [manufacturerId], references: [id])
+  shortDescription String
+  description      String
+  specs            Json
+  status           ProductStatus   @default(PUBLISHED)
+  images           ProductImage[]
+  tags             ProductTag[]
+  listings         ProductListing[]
+  metaTitle        String?
+  metaDescription  String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  // Денормализованный кэш "лучшего" листинга — пересчитывается в
+  // ProductPricingService при любом изменении, влияющем на цену/наличие
+  // (парсер обновил SourceListing, siblings связаны/отвязаны, promo recalc).
+  // Каталог (список/сортировка/фильтр по цене) читает эти поля напрямую,
+  // без джойна на SourceListing на каждый запрос — критично для Vercel
+  // Hobby serverless-таймаутов при росте каталога за пределы seed-объёма.
+  // За прямим запитом користувача — "показывать цену товара по
+  // второму из самых дешёвых вариантов, и считать заказ комплекта по
+  // самому дешевому (внутренняя цена) и по этому второму варианту
+  // (публичная цена)". cachedPriceUsd ЛИШАЄТЬСЯ семантично тим самим
+  // "що бачить покупець" (жодних змін у фронтенд-компонентах, які вже
+  // читають це поле) — просто ТЕПЕР обчислюється як другий за
+  // дешевизною, не найдешевший. Новий cachedCostPriceUsd — внутрішня
+  // собівартість (найдешевший listing), НІКОЛИ не показується
+  // публічно, лише на вкладці "Прибуток" в адмінці.
+  cachedCostPriceUsd   Decimal? @db.Decimal(10, 2) // MIN(priceUsd) — внутрішня собівартість, для розрахунку прибутку
+  cachedPriceUsd       Decimal? @db.Decimal(10, 2) // 2-й за дешевизною серед listings з inStock=true — те, що бачить покупець
+  cachedInStock        Boolean  @default(false)
+  cachedIsPromo        Boolean  @default(false)
+  cachedDiscountPercent Float?
+  cachedWarehouseCities String[] // объединение Vendor.warehouseCities по listings inStock=true, ТЗ п.25.3
+  cachedIsNew          Boolean  @default(false) // вручную в админке (парсер не определяет "новинку" сам)
+  pricingUpdatedAt     DateTime?
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+  reviews    ProductReview[]
+  importedReviews ImportedProductReview[]
+  importScoutResults ImportScoutResult[]
+
+  @@index([category])
+  @@index([manufacturerId])
+  @@index([cachedPriceUsd])
+  @@unique([manufacturerId, manufacturerSku])
+}
+
+// За прямим запитом користувача — "привязать отзывы к покупке - один
+// отзыв на каждую позицию в составе проекта, при оставлении отзыва
+// фиксировать количество купленных единиц и сколько прошло времени
+// от покупки". Замінено попередню прив'язку `@@unique([productId,
+// userId])` на прив'язку до КОНКРЕТНОЇ позиції замовлення
+// (`orderItemId @unique`) — якщо покупець замовляв той самий товар у
+// ДВОХ окремих замовленнях, тепер може лишити ДВА окремих відгуки
+// (досвід міг відрізнятись), не один "загальний" на товар.
+model ProductReview {
+  id                String           @id @default(cuid())
+  productId         String
+  product           Product          @relation(fields: [productId], references: [id])
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  orderItemId       String           @unique
+  orderItem         OrderItem        @relation(fields: [orderItemId], references: [id])
+  // Знімки на момент відгуку — НЕ живий join на OrderItem/Order щоразу
+  // при показі. quantityAtReview: OrderItem.quantity теоретично не
+  // мінявся б після створення, але явний знімок надійніший і не
+  // залежить від майбутніх змін моделі. daysSincePurchaseAtReview —
+  // ЗБЕРІГАЄТЬСЯ (не рахується наживо при кожному перегляді, щоб не
+  // "плаваюче" число день у день без дії користувача), але
+  // ПЕРЕРАХОВУЄТЬСЯ явно при редагуванні відгуку (за прямим запитом
+  // користувача — "допускается редактировать (пересчитывать сколько
+  // прошло от покупки)").
+  quantityAtReview          Int
+  daysSincePurchaseAtReview Int
+  reliabilityScore  Int // 1-10, "сонечка" — той самий UI-патерн SunRating
+  reviewText        String?
+  reviewTextStatus  ReviewTextStatus @default(PENDING)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([productId])
+  @@index([userId])
+}
+
+// За прямим запитом користувача — "добавить парсер отзывов на товары
+// отдельно скриптом для каждого магазина, показать отзывы на нашем
+// сайте с указанием источника отзыва". ОКРЕМА модель від
+// `ProductReview` (verified purchase від НАШИХ покупців) — структура
+// принципово інша: немає orderItemId/quantityAtReview (сайт-джерело
+// сам вирішує, як показує кількість/дату), є vendorName+sourceUrl
+// (обов'язкове відображення джерела — довіра до "спарсеного" відгуку
+// нижча за верифіковану покупку, приховувати це було б нечесно).
+// НІКОЛИ не змішується з ProductReview у `pickWithReliability()`
+// калькулятора (розділ README про верифіковані покупки) — джерело без
+// антиспам/verified-purchase перевірки не заслуговує того самого
+// рівня довіри для рекомендацій підбору компонентів.
+model ImportedProductReview {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id])
+  vendorName       String // Vendor.name джерела — для відображення "Джерело: {vendorName}"
+  sourceUrl        String // пряме посилання на сторінку товару, де знайдено відгук
+  authorName       String? // як показано на сайті джерела (не наш User — анонімний гість сайту-джерела)
+  ratingRaw        Float? // сира оцінка, як на сайті джерела (напр. 1-5)
+  ratingNormalized Int? // нормалізовано до тієї самої 1-10 шкали, що ProductReview — для консистентного відображення поряд
+  reviewText       String
+  publishedAtRaw   String? // дата як текстовий рядок на сайті джерела (не завжди парситься в DateTime однозначно)
+  publishedAt      DateTime?
+  // Дедуплікація МІЖ повторними прогонами парсера — сайти джерела
+  // зазвичай НЕ дають стабільний externalId відгуку в HTML, тому
+  // природний ключ — хеш нормалізованого тексту+автора (не
+  // sourceUrl+createdAt, які НЕ ідентифікують конкретний відгук
+  // однозначно).
+  contentHash      String
+  scrapedAt        DateTime @default(now())
+
+  @@unique([productId, vendorName, contentHash])
+  @@index([productId])
+}
+
+// За прямим запитом користувача — реалізація doc/TZ_ImportScout.md.
+// Той самий принцип, що вже ImportedProductReview — окрема модель,
+// не змішується з жодною наявною ціновою логікою (Product.
+// cachedCostPriceUsd лишається джерелом істини для НАШОГО каталогу,
+// ця модель — лише знайдені зовнішні пропозиції для порівняння).
+model ImportScoutResult {
+  id                String   @id @default(cuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id])
+  // ТЗ розділ 4 (після аудиту) — валідується на DTO-рівні через
+  // @IsIn, той самий патерн, що вже StartCalculatorDto.clientType.
+  source            String   // "ALIEXPRESS" | "ALIBABA" | "1688"
+  title             String   // назва, як знайдено (перекладена, якщо джерело — 1688)
+  // ТЗ розділ 2.4/4 — 1688 дає ціни в юанях, оригінал зберігається
+  // ОКРЕМО від конвертованого значення (конвертація — детермінований
+  // крок бекенду через CurrencyService, не LLM).
+  priceRawCny       Decimal? @db.Decimal(10, 2)
+  priceMinUsd       Decimal? @db.Decimal(10, 2)
+  priceMaxUsd       Decimal? @db.Decimal(10, 2)
+  moq               Int?
+  sourceUrl         String
+  // ТЗ розділ 4/5 — чи відповідає посилання очікуваному патерну
+  // сторінки КОНКРЕТНОГО товару (regex перевірка, окремий патерн на
+  // кожне джерело), не сторінки категорії/пошуку.
+  urlVerified       Boolean  @default(false)
+  supplierName      String?
+  supplierYearsOnPlatform Int?
+  // Знімок НАШОЇ поточної собівартості на момент пошуку (розділ 104
+  // README) — для порівняння пізніше, коли наша собівартість вже
+  // зміниться.
+  ourCostPriceUsdSnapshot Decimal? @db.Decimal(10, 2)
+  foundAt           DateTime @default(now())
+  requestedBy       String?
+
+  @@index([productId])
+}
+
+model ProductImage {
+  id              String   @id @default(cuid())
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  url             String
+  altText         String?
+  sortOrder       Int      @default(0)
+  sourceListingId String?
+  createdAt       DateTime @default(now())
+
+  @@index([productId])
+}
+
+model Tag {
+  id       String       @id @default(cuid())
+  slug     String       @unique
+  name     String
+  products ProductTag[]
+}
+
+model ProductTag {
+  productId String
+  tagId     String
+  product   Product @relation(fields: [productId], references: [id])
+  tag       Tag     @relation(fields: [tagId], references: [id])
+
+  @@id([productId, tagId])
+}
+
+model ArticleNumberSequence {
+  category String @id
+  lastSeq  Int             @default(0)
+}
+
+// ---------- Парсер: поставщики / сырые листинги / siblings ----------
+
+model Vendor {
+  id                String               @id @default(cuid())
+  name              String               @unique
+  website           String
+  warehouseCities   String[]
+  isActive          Boolean              @default(true)
+  contactPhone      String?
+  contactAddress    String?
+  contactPersonName String?
+  contractStatus    VendorContractStatus @default(NOT_CONTACTED)
+  contractSignedAt  DateTime?
+  contractNote      String?
+  listings          SourceListing[]
+  orderDelegations  OrderDelegation[]
+  createdAt         DateTime             @default(now())
+  // За запитом користувача — підготовка до мультикраїнності. Дефолт "UA"
+  // — усі наявні записи лишаються коректними без ручної міграції даних.
+  countryCode       String               @default("UA")
+  // За запитом користувача — тайм-боксований ідемпотентний крон
+  // product_parser (той самий принцип, що pvgis_country_grid): обробка
+  // по одному вендору за раз, сортування по lastFullyParsedAt ASC —
+  // найдавніше оброблений (або ще ніколи не оброблений — null першим)
+  // йде першим. Природна ідемпотентна резюмовність без окремого
+  // checkpoint-поля — сам timestamp і є прогресом.
+  lastFullyParsedAt DateTime?
+
+  // За запитом користувача — логічніше вважати seed-дані ще одним
+  // "постачальником" (той самий SourceListing/ProductListing механізм, що
+  // й для реального парсера), а не окремим прапорцем на Product. Але
+  // seed-товари НЕ повинні брати участь у siblings-матчингу (ні як
+  // "непов'язаний листинг, що потребує модерації", ні як джерело
+  // конкуренції з реальними вендорами за той самий товар) — цей прапорець
+  // фільтрує такого вендора з SiblingsService.getCandidates().
+  excludeFromMatching Boolean            @default(false)
+}
+
+model SourceListing {
+  id              String              @id @default(cuid())
+  vendorId        String
+  vendor          Vendor              @relation(fields: [vendorId], references: [id])
+  sourceUrl       String
+  sourceSku       String?
+  rawTitle        String
+  rawCategory     String?
+  // За прямим запитом користувача ("сохранять сырые категории с сайтов и
+  // матчить с существующими") — сирий текст категорії, як він реально
+  // відображається на сайті постачальника (H1/breadcrumb сторінки
+  // категорії, розділ README) — ОКРЕМО від rawCategory вище (той —
+  // внутрішній ключ, який МИ шукаємо на сайті, не те, що сайт сам
+  // показує). Використовується для fuzzy-порівняння з Category.name*
+  // при матчингу — розбіжність тут сигналізує "можливо, це інша
+  // категорія" і йде на модерацію.
+  siteCategoryLabel String?
+  rawPrice        Decimal             @db.Decimal(12, 2)
+  rawCurrency     String              @default("UAH")
+  priceUsd        Decimal             @db.Decimal(10, 2)
+  priceRateDate   DateTime?
+  priceCheckedAt  DateTime            @default(now())
+  priceChangedAt  DateTime?
+  inStock         Boolean             @default(true)
+  stockCheckedAt  DateTime            @default(now())
+  stockChangedAt  DateTime?
+  images          String[]
+  affiliateUrl    String?
+  isPromo         Boolean             @default(false)
+  discountPercent Float?
+  firstSeenAt     DateTime            @default(now())
+  lastParsedAt    DateTime            @default(now())
+  history         PriceHistoryEntry[]
+  products        ProductListing[]
+
+  @@unique([vendorId, sourceUrl])
+  @@index([inStock])
+}
+
+model PriceHistoryEntry {
+  id              String        @id @default(cuid())
+  sourceListingId String
+  sourceListing   SourceListing @relation(fields: [sourceListingId], references: [id])
+  priceUsd        Decimal       @db.Decimal(10, 2)
+  inStock         Boolean
+  recordedAt      DateTime      @default(now())
+
+  @@index([sourceListingId])
+}
+
+model ProductListing {
+  id              String        @id @default(cuid())
+  productId       String
+  sourceListingId String
+  product         Product       @relation(fields: [productId], references: [id])
+  sourceListing   SourceListing @relation(fields: [sourceListingId], references: [id])
+  matchType       MatchType     @default(MANUAL)
+  matchConfidence Float?
+  isPrimary       Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+
+  @@unique([productId, sourceListingId])
+}
+
+model PromoSettings {
+  id               String           @id @default(cuid())
+  category         String?
+  thresholdPercent Float
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([category])
+}
+
+// Явное "это разные товары" из очереди модерации siblings (ТЗ п.13.2, шаг 4)
+// — чтобы matching engine не предлагал ту же пару повторно на следующем
+// прогоне парсера. Кандидаты с confidence в серой зоне (0.5-0.85) сами не
+// хранятся отдельной таблицей — вычисляются на лету при открытии вкладки
+// «Кандидаты в siblings» (см. AUDIT.md, ограничение производительности при
+// росте каталога на порядок).
+model RejectedMatch {
+  id              String   @id @default(cuid())
+  sourceListingId String
+  productId       String
+  rejectedAt      DateTime @default(now())
+
+  @@unique([sourceListingId, productId])
+}
+
+// ---------- Офисы / заявки ----------
+
+model Office {
+  id        String  @id @default(cuid())
+  city      String
+  address   String
+  phone     String
+  email     String
+  workHours String
+  lat       Float?
+  lng       Float?
+  sortOrder Int     @default(0)
+  // Підготовка до мультикраїнності (див. коментар біля model Country) —
+  // дефолт "UA" зберігає коректність наявних записів без міграції даних.
+  countryCode String @default("UA")
+}
+
+model Lead {
+  id        String     @id @default(cuid())
+  name      String
+  phone     String
+  comment   String?
+  source    LeadSource @default(WEB)
+  status    LeadStatus @default(NEW)
+  createdAt DateTime   @default(now())
+}
+
+// ---------- Пользователь / лояльность ----------
+
+model User {
+  id               String   @id @default(cuid())
+  telegramId       String   @unique
+  username         String?
+  firstName        String?
+  lastName         String?
+  photoUrl         String?
+  phone            String?
+  role             UserRole @default(CUSTOMER)
+  lifetimeSpendUah Decimal  @default(0) @db.Decimal(12, 2)
+  isBlocked        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  carts  Cart[]
+  orders Order[]
+  projectEstimates ProjectEstimate[]
+  financingProgramReviews FinancingProgramReview[]
+  productReviews ProductReview[]
+  grokUsageLogs      GrokUsageLog[]
+}
+
+model LoyaltyTier {
+  id              String  @id @default(cuid())
+  minSpendUah     Decimal @unique @db.Decimal(12, 2)
+  discountPercent Float
+}
+
+// ---------- Корзина / заказы ----------
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id])
+  sessionId String?
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+model CartItem {
+  id            String   @id @default(cuid())
+  cartId        String
+  cart          Cart     @relation(fields: [cartId], references: [id])
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id])
+  listingId     String?
+  quantity      Int      @default(1)
+  priceSnapshot Decimal  @db.Decimal(10, 2)
+  addedAt       DateTime @default(now())
+
+  @@unique([cartId, productId, listingId])
+}
+
+model Order {
+  id                     String      @id @default(cuid())
+  userId                 String?
+  user                   User?       @relation(fields: [userId], references: [id])
+  contactName            String
+  contactPhone           String
+  comment                String?
+  status                 OrderStatus @default(NEW)
+  subtotalUsd            Decimal     @db.Decimal(10, 2)
+  loyaltyDiscountPercent Float       @default(0)
+  totalUsd               Decimal     @db.Decimal(10, 2)
+  exchangeRateUah        Decimal     @db.Decimal(10, 4)
+  totalUah               Decimal     @db.Decimal(12, 2)
+  source                 String
+  consentGivenAt         DateTime
+  invoicePdfUrl          String?
+
+  npCityRef        String?
+  npCityName       String? // нужно для InternetDocument/save (RecipientCityName) — адаптер требует текст, не только Ref
+  npWarehouseRef   String?
+  npWarehouseName  String? // фолбэк для createTtn, если Ref отделения недоступний (порт з SilverFinance-адаптера)
+  npRecipientName  String?
+  npRecipientPhone String?
+  ttnNumber        String?
+  ttnRef           String?
+  ttnLabelUrl      String?
+  ttnStatus        TtnStatus @default(NOT_CREATED)
+
+  items     OrderItem[]
+  delegations OrderDelegation[]
+  createdAt DateTime    @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  listingId String?
+  quantity  Int
+  priceUsd  Decimal @db.Decimal(10, 2)
+  // За прямим запитом користувача — "считать заказ комплекта по
+  // самому дешевому (внутренняя цена) и по этому второму варианту
+  // (публичная цена)... выводить на вкладке profit обе цены".
+  // Знімок собівартості САМЕ на момент замовлення (не поточний
+  // Product.cachedCostPriceUsd — ціни постачальників змінюються з
+  // часом через парсер, для розрахунку прибутку по СТАРОМУ замовленню
+  // потрібна ціна ТОДІ, не зараз). Nullable — замовлення, створені ДО
+  // цієї фічі, не мають снапшоту заднім числом.
+  costPriceUsd Decimal? @db.Decimal(10, 2)
+  // За прямим запитом користувача — "делегируем другим поставщикам и
+  // генерируем отдельно ТТН для каждого из них". Nullable — якщо
+  // NULL, позиція виконується звичайним способом (з нашого складу,
+  // єдиний ТТН замовлення). Сама делегація (постачальник + власний
+  // ТТН) — окрема модель OrderDelegation нижче, не пряме поле тут,
+  // щоб МОЖНА було зберігати ТТН-дані одного разу на ГРУПУ позицій
+  // (усі, делеговані ТОМУ САМОМУ постачальнику в межах замовлення), не
+  // дублювати ТТН-поля на кожній позиції окремо.
+  delegationId String?
+  delegation   OrderDelegation? @relation(fields: [delegationId], references: [id])
+  review    ProductReview?
+}
+
+// За прямим запитом користувача — "делегируем другим поставщикам и
+// генерируем отдельно ТТН для каждого из них". Одна группа = один
+// постачальник у межах ОДНОГО замовлення — якщо позиції без прибутку
+// делеговані ДВОМ РІЗНИМ постачальникам, буде ДВА окремих записи
+// (два окремих ТТН). Той самий набір полів, що вже Order.ttnNumber/
+// ttnRef/ttnLabelUrl/ttnStatus — тут МНОЖИННИЙ (кілька на одне
+// замовлення), там — єдиний (основна відправка з нашого складу).
+model OrderDelegation {
+  id          String      @id @default(cuid())
+  orderId     String
+  order       Order       @relation(fields: [orderId], references: [id])
+  vendorId    String
+  vendor      Vendor      @relation(fields: [vendorId], references: [id])
+  items       OrderItem[]
+  ttnNumber   String?
+  ttnRef      String?
+  ttnLabelUrl String?
+  ttnStatus   TtnStatus   @default(NOT_CREATED)
+  createdAt   DateTime    @default(now())
+}
+
+// ---------- Статьи ----------
+
+model Article {
+  id             String               @id @default(cuid())
+  slug           String               @unique
+  sourceUrl      String?
+  sourceSite     String?
+  originalLocale String               @default("uk")
+  coverImage     String?
+  // За прямим запитом користувача ("немає фото... також підтягати фото
+  // для попередніх статей") — знайдено реальний пробіл: оригінальний
+  // URL картинки з RSS раніше НІКОЛИ не зберігався окремо від
+  // фінального coverImage (Vercel Blob URL) — якщо перше завантаження
+  // на Blob провалилось (напр. BLOB_READ_WRITE_TOKEN ще не був
+  // налаштований на момент парсингу), URL картинки-джерела губився
+  // НАЗАВЖДИ, backfill без повторного парсингу RSS ставав фізично
+  // неможливим. Тепер зберігається завжди, незалежно від результату
+  // завантаження на Blob — дозволяє retry пізніше без нового RSS-запиту.
+  sourceImageUrl String?
+  // За прямим запитом користувача — "добавить скоринг статьи...
+  // релевантность теме и интересные факты есть ли в ней". Один
+  // агрегований показник (0-100), не два окремих числа — LLM враховує
+  // ОБИДВА критерії при формуванні єдиної оцінки (промпт explicitly
+  // просить саме так, окремий batch-запит на статтю, не per-locale —
+  // GrokService.buildArticleScorePrompt()). Nullable — доки відповідний
+  // batch-запит ще не оброблений.
+  score          Int?
+  scoreReasoning String?
+  tags           String[]
+  publishedAt    DateTime?
+  status         ArticleStatus        @default(DRAFT)
+  translations   ArticleTranslation[]
+  createdAt      DateTime             @default(now())
+}
+
+model ArticleTranslation {
+  id        String        @id @default(cuid())
+  articleId String
+  article   Article       @relation(fields: [articleId], references: [id])
+  locale    String
+  slug      String
+  title     String
+  excerpt   String
+  content   String
+  status    ArticleStatus @default(DRAFT)
+  createdAt DateTime      @default(now())
+
+  @@unique([articleId, locale])
+  @@unique([locale, slug])
+}
+
+// ---------- Крон-реестр (ТЗ п.27) ----------
+
+model CronJobRun {
+  id             String        @id @default(cuid())
+  jobKey         String
+  triggeredBy    String
+  debugMode      Boolean       @default(false)
+  status         CronRunStatus @default(RUNNING)
+  startedAt      DateTime      @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  itemsProcessed Int?
+  itemsFailed    Int?
+  summary        String?
+  debugLog       Json?
+  errorMessage   String?
+
+  @@index([jobKey, startedAt])
+}
+
+// ---------- Rate limiting (ТЗ п.28.3) ----------
+
+model RateLimitEntry {
+  id          String   @id @default(cuid())
+  key         String
+  windowStart DateTime
+  count       Int      @default(1)
+
+  @@unique([key, windowStart])
+  @@index([key])
+}
+
+// ---------- Новая почта: локальный кэш справочника (ТЗ п.22.3) ----------
+
+model NovaPoshtaCity {
+  ref        String                @id
+  name       String
+  region     String?
+  lat        Float? // для PVGIS-пайплайна (ТЗ п.31.10.2a) — одноразовый геокодинг при заполнении справочника
+  lng        Float?
+  warehouses NovaPoshtaWarehouse[]
+  updatedAt  DateTime              @updatedAt
+
+  @@index([name])
+}
+
+model NovaPoshtaWarehouse {
+  ref       String         @id
+  cityRef   String
+  city      NovaPoshtaCity @relation(fields: [cityRef], references: [ref])
+  name      String
+  updatedAt DateTime       @updatedAt
+
+  @@index([cityRef])
+}
+
+// ---------- Курс НБУ (ТЗ п.24.2) ----------
+
+// Підготовка до мультикраїнності (див. коментар біля model Country) —
+// НБУ-курс (rateUah) залишений з поточною назвою поля свідомо, НЕ
+// перейменований на щось загальніше (напр. rateToBase) — це торкнулося
+// б купи споживачів (formatPrice, кошик, рахунки-фактури) без
+// конкретної потреби зараз. countryCode додано, щоб майбутні курси
+// іншої валюти (напр. PLN) могли співіснувати в тій самій таблиці —
+// фактичне узагальнення поля rateUah/повна мультивалютна логіка
+// лишається окремою, більшою задачею на майбутнє, не зробленою тут.
+model ExchangeRate {
+  id          String   @id @default(cuid())
+  currency    String
+  rateUah     Decimal  @db.Decimal(10, 4)
+  rateDate    DateTime
+  fetchedAt   DateTime @default(now())
+  countryCode String   @default("UA")
+
+  @@unique([countryCode, currency, rateDate])
+}
+
+// ============================================================
+// Фаза 3 — ИИ-калькулятор проекта (ТЗ п.31)
+// ============================================================
+
+enum SchemaTopology {
+  OFF_GRID
+  BACKUP_UPS
+  GRID_TIE
+  COMMERCIAL
+}
+
+enum SchemaDiagramType {
+  BLOCK
+  PRINCIPAL
+}
+
+enum EstimateStatus {
+  DRAFT
+  FINALIZED
+  SENT
+  CONVERTED_TO_ORDER
+}
+
+// Фаза 4 (ТЗ п.31.11.0) — не реализуется в Фазе 3, поля остаются NOT_REQUESTED/пустыми
+enum GenerationStatus {
+  NOT_REQUESTED
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// Фаза 4 (ТЗ п.31.12) — не реализуется в Фазе 3, поле остаётся NONE/null
+enum ScalingStrategy {
+  NONE
+  HEADROOM
+  IDENTICAL_SEGMENTS
+}
+
+// Фаза 4 (ТЗ п.31.11.4/31.11.6) — powerRangeTag на BusinessPlanManifest
+enum PowerRangeTag {
+  SMALL
+  MEDIUM
+  LARGE
+  COMMERCIAL
+}
+
+// ТЗ п.31.1.1 — не хардкод, редактируемый справочник (как Tag)
+model ProjectGoal {
+  id              String          @id @default(cuid())
+  key             String          @unique
+  label           String
+  description     String?
+  defaultTopology SchemaTopology?
+  generatedBy     String          @default("manual") // 'ai' | 'manual'
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+}
+
+// ТЗ п.31.10.1 — фиксированные вручную подготовленные шаблоны схем,
+// НИКОГДА не генерируются ИИ свободно (см. AUDIT — критично для безопасности).
+model SchemaTemplate {
+  id              String            @id @default(cuid())
+  topology        SchemaTopology
+  diagramType     SchemaDiagramType
+  svgTemplate     String // SVG с именованными плейсхолдерами блоков
+  notes           String?
+  lastAuditReport String? // текст последнего разового ИИ-аудита, ТЗ п.31.10.1a
+  lastAuditAt     DateTime?
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([topology, diagramType])
+}
+
+// ТЗ п.31.10.2a — кэш выработки энергии по координатам, источник PVGIS
+// Підготовка до мультикраїнності — свідомо БЕЗ countryCode тут (на
+// відміну від решти моделей у цьому розділі README). Сирі точки PVGIS —
+// чисто географічні координати, не політично прив'язані до країни;
+// bounding box'и різних країн у практиці не перетинаються (Україна і
+// Польща — різні геозони), тому ризику колізії координат немає.
+// Countryscoping потрібен саме для BOUNDING BOX (яку ділянку сітки
+// рахувати) — це параметр countryBounds у getCountryBounds()
+// (solar-map.service.ts), не властивість самої точки.
+model SolarYieldEstimate {
+  id              String   @id @default(cuid())
+  lat             Float
+  lng             Float
+  tiltDegrees     Int      @default(35)
+  azimuthDegrees  Int      @default(0) // 0 = юг (конвенция PVGIS)
+  annualKwhPerKwp Decimal  @db.Decimal(10, 2)
+  fetchedAt       DateTime @default(now())
+
+  @@unique([lat, lng, tiltDegrees, azimuthDegrees])
+}
+
+// ТЗ п.31.10.3 — блочная/принципиальная схема конкретного расчёта
+model ProjectEstimateDiagram {
+  id                String            @id @default(cuid())
+  projectEstimateId String
+  projectEstimate   ProjectEstimate   @relation(fields: [projectEstimateId], references: [id])
+  diagramType       SchemaDiagramType
+  svgUrl            String
+  pngUrl            String?
+  createdAt         DateTime          @default(now())
+
+  @@unique([projectEstimateId, diagramType])
+}
+
+// ---------- Фаза 4 (только схема, без реализации в Фазе 3) ----------
+// BusinessPlanManifest/ProjectPhase включены в схему сейчас (не отдельной
+// миграцией потом), т.к. ProjectEstimate ссылается на них по FK — тот же
+// подход, что и с полями Order под Фазу 2 внутри схемы Фазы 1. Реальная
+// генерация бизнес-планов/поэтапного масштабирования — ТЗ явно относит к
+// Фазе 4 (п.11), не реализуется здесь.
+
+model BusinessPlanManifest {
+  id             String           @id @default(cuid())
+  version        Int
+  goalTags       String[]
+  powerRangeTag  PowerRangeTag?
+  content        String
+  generatedBy    String
+  adminUserId    String?
+  changeNote     String?
+  isActive       Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  projectEstimates ProjectEstimate[]
+}
+
+model ProjectPhase {
+  id                 String          @id @default(cuid())
+  projectEstimateId  String
+  projectEstimate    ProjectEstimate @relation(fields: [projectEstimateId], references: [id])
+  phaseNumber        Int
+  title              String
+  description        String
+  specItems          Json
+  cumulativeTotalUsd Decimal         @db.Decimal(10, 2)
+  timingNote         String?
+  createdAt          DateTime        @default(now())
+
+  @@unique([projectEstimateId, phaseNumber])
+}
+
+// ТЗ п.31.3 — основная модель калькулятора
+model ProjectEstimate {
+  id                     String            @id @default(cuid())
+  userId                 String?
+  user                   User?             @relation(fields: [userId], references: [id])
+  sessionId              String? // гостевая сессия до логина, тот же паттерн что Cart.sessionId
+  name                   String
+  city                   String?
+  cityRef                String? // Ref города НП — нужен для PVGIS lat/lng, ТЗ п.31.10.2a
+  budgetUsd              Decimal?          @db.Decimal(10, 2)
+  goals                  String[] // ProjectGoal.key
+  dailyConsumptionKwh    Decimal?          @db.Decimal(6, 2)
+  // За прямим запитом користувача ("нету вводных в квизе" для кабелю
+  // зниження) — метрів від місця встановлення до точки підключення
+  // споживача. Зберігається окремо (не всередині recommendedSpec Json)
+  // — щоб можна було перерахувати кабель заново без повторного
+  // проходження всього квизу, якщо користувач лише уточнить відстань.
+  cableRunMeters         Decimal?          @db.Decimal(6, 2)
+  financingNeeded        Boolean           @default(false)
+  ownFundsPercent        Float?
+  // За прямим запитом користувача — "В квиз при ветке нужно
+  // кредитование добавить вопрос кого представляет пользователь -
+  // физлицо осбб и тд (значения фильтра из вкладки кредитование)".
+  // Ті самі текстові значення, що вже FinancingFilters.tsx
+  // ("фізичні"/"ОСББ"/"бізнес") — не новий enum, щоб напряму
+  // збігатись із фільтром `eligibility` на /financing і з
+  // FinancingService.findForBusinessPlan(), яка раніше вгадувала цей
+  // тип евристикою по цілях проєкту (розділ README) — тепер реальна
+  // відповідь користувача замінює цю здогадку.
+  clientType             String?
+  // За прямим запитом користувача — "Если доп установка инвертор
+  // может быть не нужен - добавить в квиз опциональность инвертора".
+  // За замовчуванням false — не впливає на існуючу поведінку. Значення
+  // ЗАВЖДИ визначає, чи додається інвертор до спецификації —
+  // ДЕТЕРМІНОВАНО в calculator.service.ts, не покладається на те, що
+  // Grok "зрозуміє" це з тексту промпту (той самий принцип, що вже
+  // CNY-конвертація — критичне бізнес-рішення не довіряється LLM).
+  hasExistingInverter    Boolean           @default(false)
+  // За прямим запитом користувача — "внести в квиз вопрос - доверять
+  // ли рекомендациям" + "учитывать это поле рекомендации опционально
+  // при выборе компонентов". Зберігається (не transient) — потрібне і
+  // для повторного перегляду вкладки "Обґрунтування" будь-коли
+  // пізніше, не лише одразу після start().
+  trustRecommendations   Boolean           @default(false)
+  // За прямим запитом користувача — "написать обоснование выбора
+  // компонентов системы, и учтены ли рекомендации при подборе и
+  // какие, соответствие бизнес целям тоже внести". Детермінований
+  // текст/структура з resolveRequirementsToCatalog(), НЕ AI-
+  // генерація — точний запис РЕАЛЬНОЇ причини вибору кожного
+  // компонента надійніший за пост-фактум LLM-пояснення (яке могло б
+  // "галюцинувати", що рекомендації враховувались, коли насправді ні).
+  selectionReasoning     Json?
+  creditAmountUsd        Decimal?          @db.Decimal(10, 2)
+  businessPlanUrl        String? // Фаза 4
+  businessPlanManifestId String? // Фаза 4
+  businessPlanManifest   BusinessPlanManifest? @relation(fields: [businessPlanManifestId], references: [id])
+  scalingStrategy        ScalingStrategy?  @default(NONE) // Фаза 4
+  phases                 ProjectPhase[] // Фаза 4
+  recommendedSpec        Json // [{ productId, articleNumber, quantity, priceUsd }], ТЗ п.31.4
+  totalUsd                Decimal          @db.Decimal(10, 2)
+  exchangeRateUah         Decimal?         @db.Decimal(10, 4)
+  exchangeRateDate        DateTime?
+  totalUah                Decimal?         @db.Decimal(12, 2)
+  conversationLog         Json // история промптов + ответов Grok
+  annotationText          String?
+  schemaTopology          SchemaTopology?
+  diagrams                ProjectEstimateDiagram[]
+  pdfUrl                  String?
+  deliveries              ProjectEstimateDelivery[] // куда/когда/статус отправки ПРОМІЖНОГО PDF (export/send, ТЗ п.31.6) — окрема таблиця, множинні спроби
+  // Куди відправити ФІНАЛЬНИЙ пакет документів після batch-генерації
+  // бізнес-плану (ТЗ п.31.11.0, request-documents) — НЕ те саме, що
+  // ProjectEstimateDelivery: тут один цільовий контакт на весь чек-лист,
+  // а не історія кількох спроб відправки. Знайдено при аудиті реальної
+  // Docker-збірки: ці два поля були прибрані з ProjectEstimate під час
+  // аудиту фічі відправки (Фаза 3), коли contactChannel/contactValue
+  // винесли в ProjectEstimateDelivery — але пізніше, при реалізації
+  // request-documents (Фаза 4), код почав знову писати/читати їх напряму
+  // на ProjectEstimate, а схему забули повернути. Пісочниця без
+  // згенерованого Prisma Client цю помилку не ловила — виявлено тільки на
+  // реальній Docker-збірці.
+  contactChannel          String?
+  contactValue            String?
+  requestedDocuments      String[] // Фаза 4
+  generationStatus        GenerationStatus @default(NOT_REQUESTED) // Фаза 4
+  status                  EstimateStatus   @default(DRAFT)
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+enum DeliveryChannel {
+  TELEGRAM
+  EMAIL
+  WHATSAPP
+  VIBER
+}
+
+enum DeliveryStatus {
+  PENDING // запис створено, відправка ще не спробувана/в процесі
+  SENT    // для TELEGRAM/EMAIL — підтверджений виклик API; для WHATSAPP/VIBER — діплінк згенеровано і відданий користувачу (див. AUDIT — це не підтверджена доставка)
+  FAILED
+}
+
+// Куда/когда/статус отправки материалов проекта — отдельная таблица (не
+// поля на ProjectEstimate), т.к. один проект может отправляться повторно и
+// на разные каналы, история должна сохраняться, не перезаписываться.
+model ProjectEstimateDelivery {
+  id                String          @id @default(cuid())
+  projectEstimateId String
+  projectEstimate   ProjectEstimate @relation(fields: [projectEstimateId], references: [id])
+  channel           DeliveryChannel
+  contactValue      String // email/телефон/telegramId в залежності від каналу
+  status            DeliveryStatus  @default(PENDING)
+  errorMessage      String?
+  sentAt            DateTime?
+  createdAt         DateTime        @default(now())
+
+  @@index([projectEstimateId])
+  @@index([status])
+}
+
+// За прямим запитом користувача — "тарифицировать приблизительно в
+// токенах и деньгах расходы, показать и привязывать к telegram id".
+// Свідомо scope обмежено ітеративним квизом створення проєкту
+// (extractCalculatorRequirements у start()/refine() +
+// generateProjectAnnotation при фіналізації) — саме та "ітеративна
+// схема спілкування", про яку прямо йшлося в запиті, не ВСІ
+// AI-виклики проєкту (парсер статей/фінансових програм — окрема,
+// значно ширша задача, свідомо НЕ зроблена тут).
+//
+// userId nullable — гостьова сесія до логіну (той самий патерн, що
+// Cart.sessionId/ProjectEstimate.sessionId) теж має вартість, навіть
+// якщо ще не прив'язана до конкретного telegramId — sessionId
+// зберігається окремо, щоб не губити ці дані, коли гість пізніше
+// логіниться.
+model GrokUsageLog {
+  id               String   @id @default(cuid())
+  userId           String?
+  user             User?    @relation(fields: [userId], references: [id])
+  sessionId        String?
+  projectEstimateId String? // якщо відомий на момент виклику (refine — так, start — ще ні, там estimate щойно створюється)
+  purpose          String // 'calculator_requirements' | 'calculator_annotation'
+  model            String // напр. 'grok-4-fast' — щоб цінник рахувався за ФАКТИЧНОЮ моделлю виклику, не жорстко захардкодженою
+  promptTokens     Int
+  completionTokens Int
+  totalTokens      Int
+  estimatedCostUsd Decimal  @db.Decimal(10, 6) // 6 знаків — суми часто менші за $0.01 за один виклик
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// За прямим запитом користувача — "административные расходы" (окрема
+// секція вкладки "Витрати" в адмінці) — ручний облік бізнес-витрат, НЕ
+// пов'язаних з AI (хостинг, домен, реклама тощо). Простий CRUD, без
+// прив'язки до конкретного постачальника/категорії суворою типізацією
+// (category — вільний рядок, не enum) — щоб адмін міг вписати будь-що,
+// не чекаючи розширення схеми під кожну нову статтю витрат.
+model AdminExpense {
+  id          String   @id @default(cuid())
+  description String
+  category    String? // напр. 'hosting' | 'domain' | 'реклама' — вільний рядок
+  amountUsd   Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ============================================================
+// Фаза 4 — бизнес-план, финансирование, продвинутый маркетинг (ТЗ п.31.11,
+// 31.12, 32, 34.2-34.6). BusinessPlanManifest/ScalingStrategy/ProjectPhase
+// уже были заведены в схему на этапе Фазы 3 (форвард-совместимость FK на
+// ProjectEstimate) — здесь только реализация их функциональности плюс
+// остальные модели.
+// ============================================================
+
+// ТЗ п.31.11.1a — тариф для розрахунку окупності (зелений тариф / роздрібна
+// економія на самоспоживанні), ведеться вручну в адмінці, не парситься.
+model TariffRate {
+  id             String   @id @default(cuid())
+  key            String // 'GREEN_TARIFF' | 'RETAIL_AVERAGE'
+  label          String
+  rateUahPerKwh  Decimal  @db.Decimal(6, 4)
+  sourceUrl      String?
+  updatedAt      DateTime @updatedAt
+  // Підготовка до мультикраїнності (див. коментар біля model Country) —
+  // тарифи на електроенергію завжди національні/регіональні. Дефолт
+  // "UA" + перенесення унікальності з одного лише `key` на пару
+  // (countryCode, key) — щоб майбутня країна могла мати свій
+  // GREEN_TARIFF/RETAIL_AVERAGE без конфлікту з українськими значеннями.
+  countryCode    String   @default("UA")
+
+  @@unique([countryCode, key])
+}
+
+// За прямим запитом користувача — "На вкладке Налаштування добавить
+// секцію Налаштування документообігу, тот же список что в четвертой
+// вкладке калькулятора". Простий toggle на кожен тип документа з
+// DocumentChecklist.tsx (SPEC/ANNOTATION/BLOCK_DIAGRAM/
+// PRINCIPAL_DIAGRAM/BUSINESS_PLAN) — чи можна клієнту його обрати на
+// сайті. SPEC і BUSINESS_PLAN захищені від вимкнення на backend-рівні
+// (не лише UI, розділ CalculatorSettingsService) — "Спецификация и
+// бизнес план чекбоксами всегда ✅ checked".
+model DocumentTypeSetting {
+  id      String  @id @default(cuid())
+  key     String  @unique // 'SPEC' | 'ANNOTATION' | 'BLOCK_DIAGRAM' | 'PRINCIPAL_DIAGRAM' | 'BUSINESS_PLAN'
+  enabled Boolean @default(true)
+}
+
+// ТЗ п.31.11.6 — границі діапазонів потужності (SMALL/MEDIUM/LARGE),
+// оцінюються через ІІ по статистиці каталогу, застосовуються вручну.
+model PowerRangeThreshold {
+  id              String        @id @default(cuid())
+  tag             PowerRangeTag @unique
+  minPanelsWattW  Int // нижня межа сумарної потужності панелей проєкту, Вт
+  maxPanelsWattW  Int? // null = без верхньої межі (COMMERCIAL)
+  aiSuggestion    String? // текст останньої пропозиції ІІ з обґрунтуванням, чернетка до застосування
+  updatedAt       DateTime      @updatedAt
+}
+
+// ТЗ п.31.12.6 — поріг «незначної переплати» для стратегії HEADROOM,
+// оцінюється через ІІ по реальних цінових кроках каталогу.
+model ScalingThreshold {
+  id                      String          @id @default(cuid())
+  category                String
+  headroomMaxPricePercent Float
+  aiSuggestion            String?
+  updatedAt               DateTime        @updatedAt
+
+  @@unique([category])
+}
+
+enum FinancingProgramStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// ТЗ п.31.11.2/32 — реальні програми кредитування, ІІ лише знаходить
+// кандидатів (ІІ-парсер, п.32.1), не публікує сам — обов'язкова модерація.
+model FinancingProgram {
+  id                 String                  @id @default(cuid())
+  name               String
+  eligibility        String // "фізичні особи" / "ОСББ/ЖБК" / "бізнес"
+  description        String
+  url                String
+  discoverySourceUrl String?
+  minLoanUsd         Decimal?                @db.Decimal(10, 2)
+  maxLoanUsd         Decimal?                @db.Decimal(10, 2)
+  // За запитом користувача — "парсити і картинки з сайтів програм
+  // кредитування" + "верифікувати чи є картинки в попередніх оголошеннях
+  // і дописувати". Nullable — старі записи (до цього поля) підтягнуть
+  // картинку природним чином при наступному повторному парсингу того ж
+  // seed-topic (той самий цикл, що вже шукає ці програми регулярно,
+  // окремий backfill-прохід не потрібен).
+  imageUrl           String?
+  status             FinancingProgramStatus  @default(PUBLISHED)
+  lastVerifiedAt     DateTime?
+  lastSeenInParserAt DateTime? // ТЗ п.32.1 крок 5 — коли востаннє зустрічалась при парсингу
+  needsRecheck       Boolean                 @default(false) // не зустрічалась останні N прогонів — можливо закрилась
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  // Підготовка до мультикраїнності (див. коментар біля model Country) —
+  // програми кредитування завжди прив'язані до конкретної країни
+  // (банк/уряд), дефолт "UA" зберігає коректність наявних записів.
+  countryCode        String                  @default("UA")
+  reviews            FinancingProgramReview[]
+
+  @@index([status])
+  @@unique([name, url])
+}
+
+enum ReviewTextStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// За прямим запитом користувача — комплексний відгук про програму
+// кредитування, 4 шкали + опційний текст. Числові оцінки публікуються
+// одразу (агрегати на картках рахуються по них негайно), текст —
+// окремо модерується в адмінці, до затвердження ніде публічно не
+// показується. Прив'язка до User (Telegram) — лише для анти-спаму (один
+// відгук на програму від користувача) і НІКОЛИ не віддається публічно —
+// жодного публічного API-поля з іменем/юзернеймом клієнта немає
+// взагалі, статистика анонімна за задумом (дисклеймер на сторінці
+// відгуків), не просто "приховане поле".
+model FinancingProgramReview {
+  id                  String           @id @default(cuid())
+  financingProgramId  String
+  financingProgram    FinancingProgram @relation(fields: [financingProgramId], references: [id])
+  userId              String
+  user                User             @relation(fields: [userId], references: [id])
+  city                String
+  branch              String
+  // 1-5 кожна. businessPlanQualityScore — "скільки довелось доробляти"
+  // (5 = нічого не довелось доробляти, план був готовий одразу).
+  businessPlanQualityScore Int
+  bankResponsivenessScore  Int
+  processingSpeedScore     Int
+  applicationSuccessScore  Int
+  // Окреме число (не просто якісна шкала) — "процент покриття заявки
+  // від прогнозу" калькулятора, наскільки реально схвалена сума
+  // збіглась із розрахованою. Nullable — клієнт міг не знати точний %.
+  coveragePercent     Int?
+  reviewText          String?
+  reviewTextStatus    ReviewTextStatus @default(PENDING)
+  createdAt           DateTime         @default(now())
+
+  @@unique([financingProgramId, userId])
+  @@index([financingProgramId])
+}
+
+// ТЗ п.34.6.4 — простий лог показів embed-віджету карти потенціалу
+model EmbedView {
+  id          String   @id @default(cuid())
+  widgetKey   String // 'solar-map' — на майбутнє, якщо з'являться інші віджети
+  refererHost String?
+  viewedAt    DateTime @default(now())
+
+  @@index([widgetKey, viewedAt])
+}
+
+// Кэш IDW-интерполированной сетки карты потенциала (аудит Фазы 4 —
+// см. AUDIT-PHASE-4.md/AUDIT-FULL.md): интерполяция считается один раз при
+// пересчёте офлайн-сетки (тяжёлая операция), не на каждый запрос страницы.
+// Одна строка на резолюцию сетки — climatology почти не меняется, кэш без
+// срока годности, пересчитывается вручную вместе с офлайн-сеткой PVGIS.
+model SolarMapInterpolatedGrid {
+  id          String   @id @default(cuid())
+  resolution  Int      // количество ячеек по большей стороне bounding box
+  cellsJson   Json     // [{ lat, lng, annualKwhPerKwp }] — плотная интерполированная сетка
+  sourcePoints Int     // сколько исходных точек PVGIS использовано для интерполяции — для отладки/прозрачности
+  computedAt  DateTime @default(now())
+  // Підготовка до мультикраїнності (див. коментар біля model Country) —
+  // bounding box для інтерполяції завжди прив'язаний до конкретної
+  // країни (UKRAINE_BOUNDS у solar-map.service.ts). Дефолт "UA" +
+  // перенесення унікальності з одного лише `resolution` на пару
+  // (countryCode, resolution) — інакше сітка Польщі перезаписала б
+  // українську при тій самій роздільній здатності.
+  countryCode String   @default("UA")
+
+  @@unique([countryCode, resolution])
+}
+
+// Асинхронна пачка запитів до xAI Batch API — за прямим запитом користувача
+// ("используй grok batch job с ожиданием для экономии средств"), паттерн і
+// точна форма ендпоінтів перенесені з реально протестованого коду проєкту
+// RoadScout (doc/AUDIT-grok-batch-api.md там) — Batch API коштує на 20-50%
+// дешевше за звичайні синхронні виклики (docs.x.ai/developers/pricing),
+// але обробка асинхронна (типово до 24 годин, best-effort, не гарантовано)
+// — не підходить для інтерактивних сценаріїв (калькулятор, дев-логін), але
+// ідеально для фонового рерайту/перекладу статей (ТЗ п.17.2), де користувач
+// і так не чекає результат синхронно.
+model GrokBatchJob {
+  id          String    @id @default(cuid())
+  xaiBatchId  String    @unique
+  // Тип роботи в цій пачці — наразі тільки 'article-rewrite', але поле
+  // навмисно рядкове (не enum), щоб додавати нові типи пачок без міграції.
+  jobType     String
+  // pending (щойно подано) -> processing (частково готово, чекаємо решту)
+  // -> completed (результати забрані й оброблені) -> failed
+  status      String    @default("pending")
+  // Мапа "batch_request_id -> контекст запиту" (для article-rewrite:
+  // {articleId, locale}) — потрібна, щоб зіставити результати назад із
+  // конкретною статтею/локаллю після отримання відповіді від xAI.
+  requestMap  Json
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([status])
+}
+
+// ============================================================
+// Мультикраїнність — за прямим запитом користувача: "заложи в
+// архитектуре (особенно бд) сразу что возможно масштабирование на
+// другие страны например Польшу (пока без конкретики по странам)".
+// Довідкова таблиця + countryCode на регіонально-залежних моделях
+// нижче — без жодної Польщо-специфічної логіки зараз, лише точка
+// розширення, щоб додавання нової країни пізніше не вимагало болючих
+// міграцій (перейменування таблиць, зміни унікальних ключів на вже
+// заповнених даними моделях).
+// ============================================================
+
+model Country {
+  code         String  @id // ISO 3166-1 alpha-2 ('UA', майбутнє 'PL' тощо)
+  name         String
+  currencyCode String  // ISO 4217 ('UAH', майбутнє 'PLN')
+  isActive     Boolean @default(true)
+}

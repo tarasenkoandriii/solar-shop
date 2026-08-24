@@ -1,0 +1,142 @@
+# Docker Compose автоматично підхоплює /.env (той самий файл, що й
+# apps/api/apps/web/apps/admin/apps/tma читають напряму, див.
+# /.env.example) для підстановок ${VAR}/${VAR:-default} нижче — окремого
+# --env-file не потрібно, файл лежить у тій самій директорії, що й цей
+# docker-compose.yml. Якщо кореневого /.env немає — використовуються
+# дефолти після `:-` в кожному записі, `docker compose up` працює й без
+# нього "з коробки" для локальної розробки.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: solarshop
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d solarshop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://dev:dev@postgres:5432/solarshop
+      # За прямим запитом користувача — "для supabase должен быть
+      # DIRECT_URL для конфига ORM". Локально пулера немає (звичайний
+      # Postgres у контейнері) — обидва значення природно однакові,
+      # на Supabase (Vercel-деплой, .env.example) вони РІЗНІ.
+      DIRECT_URL: postgresql://dev:dev@postgres:5432/solarshop
+      PORT: 3001
+      JWT_SECRET: dev-secret-change-me
+      NODE_ENV: development
+      # Локальная разработка под Docker Compose — dev-вход в админку без
+      # Telegram (см. README раздел про dev-логин). Убрать/поставить false
+      # при любом деплое, где docker-compose используется не только локально.
+      ENABLE_DEV_LOGIN: "true"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-000000:dev-placeholder-token}
+      TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN:-111111:dev-admin-placeholder-token}
+      TELEGRAM_MANAGER_CHAT_ID: ${TELEGRAM_MANAGER_CHAT_ID:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      # За прямим запитом користувача ("but already setted... GROK_
+      # MANAGEMENT_API_KEY=..." — реальний баг у власній реалізації)
+      # — знайдено реальну причину: docker-compose.yml використовує
+      # ЯВНИЙ список `environment:`, не `env_file:` — Docker Compose
+      # передає в контейнер ЛИШЕ те, що прямо перелічено тут. Логіку
+      # читання цих двох змінних (розділ README про плашку балансу
+      # Grok AI) додано в код `GrokUsageService`, але забуто прописати
+      # тут — значення в `.env` фізично не долітало до контейнера,
+      # незалежно від того, чи воно реально задане.
+      GROK_MANAGEMENT_API_KEY: ${GROK_MANAGEMENT_API_KEY:-}
+      GROK_TEAM_ID: ${GROK_TEAM_ID:-}
+      CRON_SECRET: ${CRON_SECRET:-dev-cron-secret}
+      NOVA_POSHTA_API_KEY: ${NOVA_POSHTA_API_KEY:-}
+      NOVA_POSHTA_CITY_SENDER_REF: ${NOVA_POSHTA_CITY_SENDER_REF:-}
+      NOVA_POSHTA_SENDER_REF: ${NOVA_POSHTA_SENDER_REF:-}
+      NOVA_POSHTA_SENDER_ADDRESS_REF: ${NOVA_POSHTA_SENDER_ADDRESS_REF:-}
+      NOVA_POSHTA_CONTACT_SENDER_REF: ${NOVA_POSHTA_CONTACT_SENDER_REF:-}
+      NOVA_POSHTA_SENDER_PHONE: ${NOVA_POSHTA_SENDER_PHONE:-}
+      BLOB_READ_WRITE_TOKEN: ${BLOB_READ_WRITE_TOKEN:-}
+      EMAIL_API_KEY: ${EMAIL_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      CORS_ORIGINS: http://localhost:3000,http://localhost:3002,http://localhost:3003
+    ports: ["3001:3001"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+        NEXT_PUBLIC_ENABLE_DEV_LOGIN: "true"
+        # Той самий клас проблеми, що з API_INTERNAL_URL нижче — NEXT_PUBLIC_*
+        # запікається в клієнтський бандл на етапі next build, не в
+        # рантаймі, тому обов'язково і тут, у build.args, не тільки в
+        # environment: нижче.
+        NEXT_PUBLIC_ADMIN_URL: http://localhost:3002
+        # Знайдено 18.08.2026: без цього next build "запікав"
+        # process.env.API_INTERNAL_URL як undefined → фолбек
+        # 'http://localhost:3001' у routes-manifest НАЗАВЖДИ (Next.js
+        # обчислює rewrites() тільки на build, не в рантаймі — див.
+        # коментар у apps/web/Dockerfile). Значення тут МАЄ збігатися з
+        # environment: нижче.
+        API_INTERNAL_URL: http://api:3001
+    environment:
+      # NEXT_PUBLIC_API_URL — используется только серверными (SSR) публичными
+      # чтениями каталога, браузер её напрямую для авторизованных запросов
+      # больше не вызывает (см. next.config.mjs rewrites).
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-solarshop_bot}
+      # API_INTERNAL_URL — серверная переменная (без NEXT_PUBLIC), адрес api
+      # внутри docker-сети (имя сервиса, не localhost) — цель rewrite-прокси
+      # для /api/* запросов из браузера. ВАЖНО: то же значение уже задано
+      # выше в build.args — реальный proxy destination зафиксирован на
+      # этапе сборки, эта строка сохранена для консистентности/на случай,
+      # если Next.js когда-нибудь начнёт честно перечитывать рантайм-env.
+      API_INTERNAL_URL: http://api:3001
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+  admin:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      args:
+        NEXT_PUBLIC_TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME:-solarshop_admin_bot}
+        NEXT_PUBLIC_ENABLE_DEV_LOGIN: "true"
+        # Той самий фікс, що для web вище (детальний коментар там)
+        API_INTERNAL_URL: http://api:3001
+    environment:
+      NEXT_PUBLIC_TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME:-solarshop_admin_bot}
+      API_INTERNAL_URL: http://api:3001
+    ports: ["3002:3000"]
+    depends_on: [api]
+
+  tma:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: apps/tma/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    ports: ["3003:3000"]
+    depends_on: [api]
+
+volumes:
+  pgdata:

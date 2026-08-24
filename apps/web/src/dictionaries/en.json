@@ -1,0 +1,147 @@
+{
+  "nav": {
+    "solarPanels": "Solar Panels",
+    "batteries": "Batteries",
+    "controllers": "Charge Controllers",
+    "contacts": "Contacts",
+    "payment": "Payment",
+    "articles": "News",
+    "account": "Account",
+    "calculator": "Calculator",
+    "financing": "Financing",
+    "more": "More",
+    "menu": "Menu",
+    "catalogNav": "Catalog"
+  },
+  "hero": {
+    "title": "Solar energy for your home",
+    "subtitle": "Reliable solar solutions for homes and businesses",
+    "ctaCatalog": "View catalog",
+    "ctaCalculate": "Calculate system",
+    "alt": "Solar panels installed on the roof of a private home"
+  },
+  "about": {
+    "title": "About us",
+    "text": "We supply solar energy equipment and have offices in four Ukrainian cities. Warranty and certificates across the range."
+  },
+  "categories": {
+    "title": "Product categories"
+  },
+  "manufacturers": {
+    "title": "Our manufacturers"
+  },
+  "offices": {
+    "title": "Our offices",
+    "viewAll": "All contacts"
+  },
+  "solarMap": {
+    "title": "Solar potential map of Ukraine",
+    "caption": "Data from PVGIS, European Commission Joint Research Centre",
+    "source": "Source: PVGIS"
+  },
+  "catalog": {
+    "sortLabel": "Sort",
+    "sortPriceAsc": "Price: low to high",
+    "sortPriceDesc": "Price: high to low",
+    "sortNewest": "Newest",
+    "manufacturerLabel": "Manufacturer",
+    "inStockOnly": "In stock only",
+    "noResults": "No products match the selected filters",
+    "details": "Details",
+    "priceFrom": "Price",
+    "promoOnly": "Sale items only"
+  },
+  "product": {
+    "article": "SKU",
+    "inStock": "In stock",
+    "outOfStock": "On order",
+    "askPrice": "Ask for price",
+    "specsTitle": "Specifications",
+    "descriptionTitle": "Description",
+    "addToCart": "Add to cart",
+    "buyNow": "Buy now",
+    "availableInCities": "In stock in cities",
+    "promo": "Sale"
+  },
+  "lead": {
+    "name": "Name",
+    "phone": "Phone",
+    "comment": "Comment",
+    "submit": "Send request",
+    "success": "Thank you! We'll contact you shortly."
+  },
+  "contacts": {
+    "title": "Contacts",
+    "formTitle": "Get in touch"
+  },
+  "payment": {
+    "title": "Payment",
+    "slogan": "Nothing builds purchase confidence like 100% prepayment",
+    "explanation": "The shipment is handed to the carrier strictly after 100% payment is confirmed.",
+    "processTitle": "How it works",
+    "process1": "Request or order",
+    "process2": "Manager issues an invoice",
+    "process3": "Payment by bank details",
+    "process4": "Manager confirms receipt",
+    "process5": "Shipment with a ready waybill",
+    "detailsTitle": "Payment details"
+  },
+  "footer": {
+    "rights": "All rights reserved",
+    "privacy": "Privacy Policy",
+    "offer": "Public Offer"
+  },
+  "currency": {
+    "usd": "USD",
+    "uah": "UAH"
+  },
+  "login": {
+    "button": "Log in with Telegram"
+  },
+  "notFound": {
+    "title": "Page not found",
+    "back": "Back home"
+  },
+  "cart": {
+    "title": "Cart",
+    "empty": "Your cart is empty",
+    "quantity": "Qty",
+    "remove": "Remove",
+    "subtotal": "Subtotal",
+    "checkout": "Checkout",
+    "continueShopping": "Continue shopping"
+  },
+  "checkout": {
+    "title": "Checkout",
+    "contactName": "Recipient name",
+    "contactPhone": "Phone",
+    "comment": "Order comment",
+    "city": "City",
+    "warehouse": "Warehouse / parcel locker",
+    "consent": "I consent to personal data processing",
+    "submit": "Confirm order",
+    "buyNow": "Buy now",
+    "success": "Order placed!",
+    "orderNumber": "Order number",
+    "ttnNumber": "Nova Poshta waybill number",
+    "goToAccount": "Go to account"
+  },
+  "account": {
+    "title": "Account",
+    "orders": "My orders",
+    "noOrders": "No orders yet",
+    "loyaltyTitle": "Your discount",
+    "loginRequired": "Log in with Telegram to see your account",
+    "orderStatus": {
+      "NEW": "New",
+      "INVOICED": "Invoiced",
+      "PAID": "Paid",
+      "SHIPPED": "Shipped",
+      "CANCELLED": "Cancelled"
+    }
+  },
+  "articles": {
+    "title": "News",
+    "noArticles": "No news yet"
+  }
+}

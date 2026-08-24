@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import 'leaflet/dist/leaflet.css';
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap');
+
+body {
+  @apply bg-white text-leaf-900;
+}
+
+/* За прямим запитом користувача ("сделай по тз... не правь пункты
+   меню и тексты - только стили") — глобальні перевизначення для
+   РЕАЛЬНО використовуваних Tailwind-класів (список зібраний через
+   grep по всьому apps/web/src, не вигаданий) — [data-theme='modern']
+   .class селектор має ВИЩУ специфічність, ніж сам .class (0,2,0
+   проти 0,1,0), тому перевизначає коректно БЕЗ !important і БЕЗ
+   правки кожного з ~48 файлів сторінок/компонентів вручну — єдина
+   практична стратегія для повного покриття сайту, як прямо вимагає
+   ТЗ (розділ 55: "SEO pages должны использовать ту же визуальную
+   систему... Не создавать отдельный «SEO дизайн»"). */
+[data-theme='modern'] {
+  color-scheme: dark;
+}
+
+[data-theme='modern'] body {
+  background-color: #080a0d; /* --bg-0, ТЗ розділ 5.1 */
+}
+
+/* Текст — основний колір + всі opacity-варіанти, що реально
+   зустрічаються в коді (перевірено grep, не вигадано довільний
+   набір) */
+[data-theme='modern'] .text-leaf-900 { color: #f5f7fa; }
+[data-theme='modern'] .text-leaf-900\/30 { color: rgb(245 247 250 / 0.3); }
+[data-theme='modern'] .text-leaf-900\/40 { color: rgb(245 247 250 / 0.4); }
+[data-theme='modern'] .text-leaf-900\/50 { color: rgb(245 247 250 / 0.55); }
+[data-theme='modern'] .text-leaf-900\/60 { color: rgb(245 247 250 / 0.65); }
+[data-theme='modern'] .text-leaf-900\/70 { color: rgb(245 247 250 / 0.75); }
+[data-theme='modern'] .text-leaf-900\/80 { color: rgb(245 247 250 / 0.85); }
+[data-theme='modern'] .text-leaf-800 { color: #a7afba; }
+[data-theme='modern'] .text-leaf-800\/40 { color: rgb(167 175 186 / 0.6); }
+[data-theme='modern'] .text-leaf-800\/50 { color: rgb(167 175 186 / 0.65); }
+[data-theme='modern'] .text-leaf-800\/70 { color: rgb(167 175 186 / 0.8); }
+[data-theme='modern'] .text-leaf-700 { color: #a7afba; }
+
+/* Фони поверхонь — за ієрархією ТЗ розділ 6/46: bg-50 (світлі
+   картки в classic) стають bg-2 (картки в modern), bg-900 (темний
+   header/footer у classic) лишається темним, але вирівнюється під
+   нову палітру */
+[data-theme='modern'] .bg-white { background-color: #12161b; } /* --bg-2 */
+[data-theme='modern'] .bg-leaf-50 { background-color: #12161b; } /* --bg-2 */
+[data-theme='modern'] .bg-leaf-50\/60 { background-color: rgb(18 22 27 / 0.6); }
+[data-theme='modern'] .bg-leaf-900 { background-color: #0d1014; } /* --bg-1 */
+[data-theme='modern'] .bg-leaf-800 { background-color: #171c22; } /* --bg-3 */
+[data-theme='modern'] .bg-leaf-800\/5 { background-color: rgb(255 255 255 / 0.04); }
+[data-theme='modern'] .bg-leaf-800\/10 { background-color: rgb(255 255 255 / 0.06); }
+[data-theme='modern'] .bg-leaf-700\/10 { background-color: rgb(255 255 255 / 0.08); }
+
+/* Бордери — тонкі, за розділом 5.2/31 ТЗ ("Не використовувати яскраві
+   сірі рамки", 1px solid border-default як основний) */
+[data-theme='modern'] .border-leaf-800 { border-color: rgba(255, 255, 255, 0.14); } /* --border-strong */
+[data-theme='modern'] .border-leaf-800\/5 { border-color: rgba(255, 255, 255, 0.04); }
+[data-theme='modern'] .border-leaf-800\/10 { border-color: rgba(255, 255, 255, 0.09); } /* --border-default */
+[data-theme='modern'] .border-leaf-800\/15 { border-color: rgba(255, 255, 255, 0.09); }
+[data-theme='modern'] .border-leaf-800\/20 { border-color: rgba(255, 255, 255, 0.09); }
+[data-theme='modern'] .border-leaf-800\/30 { border-color: rgba(255, 255, 255, 0.14); }
+[data-theme='modern'] .border-leaf-800\/60 { border-color: rgba(255, 255, 255, 0.14); }
+[data-theme='modern'] .border-white\/10 { border-color: rgba(255, 255, 255, 0.09); }
+[data-theme='modern'] .border-white\/15 { border-color: rgba(255, 255, 255, 0.09); }
+[data-theme='modern'] .border-white\/30 { border-color: rgba(255, 255, 255, 0.14); }
+[data-theme='modern'] .border-white\/60 { border-color: rgba(255, 255, 255, 0.2); }
+
+/* Семантичні статусні кольори — світліші відтінки для контрасту на
+   темному тлі (ТЗ розділ 5.5), той самий hue, не інший колір */
+[data-theme='modern'] .text-red-600 { color: #f87171; }
+[data-theme='modern'] .text-red-700 { color: #ef4444; }
+[data-theme='modern'] .text-green-600 { color: #4ade80; }
+[data-theme='modern'] .text-green-700 { color: #22c55e; }
+[data-theme='modern'] .text-green-800 { color: #22c55e; }
+[data-theme='modern'] .text-orange-500 { color: #fbbf24; }
+[data-theme='modern'] .text-orange-700 { color: #f59e0b; }
+[data-theme='modern'] .text-orange-800 { color: #f59e0b; }
+[data-theme='modern'] .text-sun-600 { color: #f5b83d; }
+[data-theme='modern'] .bg-orange-50 { background-color: rgba(245, 158, 11, 0.1); }
+
+/* За прямим запитом користувача — знайдені grep-ом по ВСІХ сторінках
+   решта alert/notification-блоків (success/error/info у формах
+   калькулятора, чеклисту документів, checkout, товарах) — той самий
+   набір семантичних токенів ТЗ розділ 5.5 */
+[data-theme='modern'] .bg-blue-50 { background-color: rgba(56, 189, 248, 0.1); }
+[data-theme='modern'] .text-blue-700 { color: #38bdf8; }
+[data-theme='modern'] .bg-green-50 { background-color: rgba(34, 197, 94, 0.1); }
+[data-theme='modern'] .border-green-200 { border-color: rgba(34, 197, 94, 0.25); }
+[data-theme='modern'] .border-green-300 { border-color: rgba(34, 197, 94, 0.35); }
+[data-theme='modern'] .bg-red-50 { background-color: rgba(239, 68, 68, 0.1); }
+[data-theme='modern'] .bg-red-500 { background-color: #ef4444; }
+[data-theme='modern'] .border-orange-300 { border-color: rgba(245, 158, 11, 0.35); }
+[data-theme='modern'] .bg-white\/90 { background-color: rgba(18, 22, 27, 0.9); }
+
+/* Card/button radius — нормалізація за розділом 31 ТЗ (8-12px
+   замість "rounded-2xl"/"rounded-full" суцільного "marketing UI") —
+   застосовується вибірково через .rounded-2xl/.rounded-xl, не
+   .rounded-full (кнопки з pill-формою лишаються — вони вже
+   компактні, п.33 ТЗ не забороняє pill для кнопок конкретно, лише
+   для filter chips розділ 27) */
+[data-theme='modern'] .rounded-2xl { border-radius: 12px; }
+[data-theme='modern'] .rounded-xl { border-radius: 10px; }
+
+/* Тіні — мінімізовано за розділом 32 ТЗ ("prefer border over
+   shadow" для звичайних карток) */
+[data-theme='modern'] .shadow-lg,
+[data-theme='modern'] .hover\:shadow-lg:hover {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ambient-drift,
+  .animate-fade-up,
+  .animate-live-pulse {
+    animation: none !important;
+  }
+}
