@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel } from './scrape-utils';
+import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel, parsePriceText } from './scrape-utils';
 import type { ISourceAdapter, RawListing } from '../adapter.interface';
 
 // vencon.ua — приоритет №4 по ТЗ п.12 (шире по номенклатуре, 470+ позиций
@@ -55,7 +55,7 @@ export class VenconAdapter implements ISourceAdapter {
         const sourceUrl = link.attr('href') ?? '';
         const rawTitle = link.text().trim() || link.attr('title')?.trim() || '';
         const priceText = $el.find('[class*="price"]').first().text();
-        const rawPrice = parsePrice(priceText);
+        const rawPrice = parsePriceText(priceText);
         const bodyText = $el.text();
         const skuText = bodyText.match(/Код:\s*(\d+)/)?.[1];
         // "Закінчується" — товар ещё в наличии, но заканчивается (не outOfStock).
@@ -83,10 +83,4 @@ export class VenconAdapter implements ISourceAdapter {
 
     return { listings, isComplete: true };
   }
-}
-
-function parsePrice(text: string): number | null {
-  const cleaned = text.replace(/[^\d]/g, '');
-  if (!cleaned) return null;
-  return Number(cleaned);
 }

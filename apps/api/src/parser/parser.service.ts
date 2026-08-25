@@ -16,6 +16,8 @@ export interface ParserRunResult {
   matchAttempted: number;
   /** Позиції, що впали з помилкою і були пропущені (решта оброблена). */
   failed?: number;
+  /** Позиції, пропущені через відсутній курс або нерозбірну ціну. */
+  skipped?: number;
   error?: string;
 }
 
@@ -26,6 +28,19 @@ export interface ParserRunResult {
 // жорсткий ліміт зʼєднань пулера, і парсер ділить його з живим трафіком
 // сайту. Піднімати варто разом з планом Supabase.
 const DEFAULT_LISTING_CONCURRENCY = 4;
+
+// Скільки рядків беремо на перерахунок за прогін. Обмежує і час, і обсяг
+// запиту; недороблене підхопить наступний прогін.
+const REPAIR_BATCH_SIZE = 1_000;
+
+// Стеля колонки priceUsd — Decimal(10,2).
+const MAX_PRICE_USD = 99_999_999.99;
+
+// Яку валюту шукати в ExchangeRate для ціни в даній валюті. Для гривні —
+// курс долара (гривень за долар), на який ділимо.
+function rateCurrencyFor(rawCurrency: string): string {
+  return rawCurrency === 'UAH' ? 'USD' : rawCurrency;
+}
 
 // Скільки звернень до Grok дозволено за один прогін парсера.
 const DEFAULT_LLM_CALLS_PER_RUN = 25;
@@ -109,6 +124,18 @@ export class ParserService {
       skipped: 0,
     });
 
+    // Ремонт рядків, записаних до того, як з'явився захист вище: у них
+    // priceUsd насправді містить суму у ВИХІДНІЙ валюті, бо курсу на
+    // момент запису не було. Маркер однозначний — priceRateDate IS NULL
+    // при не-доларовій валюті: жоден коректний запис такого не має.
+    //
+    // Робимо це на початку прогону, до вендорів: перерахунок дешевий
+    // (один UPDATE), а поки він не зроблений, каталог показує ціни,
+    // завищені в десятки разів.
+    await this.repairUnconvertedPrices(cache, deadlineAt).catch((err) => {
+      this.logger.error(`Перерахунок неконвертованих цін не вдався: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
     const neverParsed = await this.prisma.client.vendor.findMany({
       where: { isActive: true, lastFullyParsedAt: null },
       orderBy: { createdAt: 'asc' },
@@ -150,6 +177,14 @@ export class ParserService {
         // гілки такий вендор відзвітував би як цілком успішний.
         if (vendorResult.failed && vendorResult.failed === vendorResult.fetched && vendorResult.fetched > 0) {
           vendorResult.error = `Усі ${vendorResult.failed} позицій впали з помилкою — див. warn-логи.`;
+        }
+        // Те саме для пропущених: якщо з вендора не записано НІЧОГО, бо
+        // немає курсу, це не успішний прогін. Без цієї гілки повна
+        // зупинка каталогу (не відпрацював nbu_rate_sync) виглядала б у
+        // історії крона як бездоганний SUCCESS: лічильник failed нульовий,
+        // vendorsSkippedDueToBudget порожній, lastFullyParsedAt проставлено.
+        if (vendorResult.skipped && vendorResult.skipped === vendorResult.fetched && vendorResult.fetched > 0) {
+          vendorResult.error = `Усі ${vendorResult.skipped} позицій пропущено (немає курсу або нерозбірна ціна) — нічого не записано.`;
         }
         const isVendorComplete = scrapeComplete && vendorResult.isComplete;
           if (isVendorComplete) {
@@ -202,6 +237,13 @@ export class ParserService {
       await this.flushPendingPricing(cache, pricingDeadlineAt);
     }
 
+    if (cache.missingRateCurrencies.size > 0) {
+      console.log(
+        `[ParserService] УВАГА: немає курсу для ${[...cache.missingRateCurrencies].join(', ')} — позиції в цих валютах пропущені, ` +
+          'щоб не записати суму в чужій валюті як долари. Перевір, чи відпрацював джоб nbu_rate_sync.',
+      );
+    }
+
     if (cache.llm.skipped > 0) {
       console.log(
         `[ParserService] Бюджет звернень до Grok вичерпано — ${cache.llm.skipped} позицій сірої зони пішли одразу в ручну модерацію (спробуємо наступного прогону).`,
@@ -214,12 +256,97 @@ export class ParserService {
     return { results, vendorsSkippedDueToBudget, isComplete };
   }
 
+  // Перераховує priceUsd для рядків, збережених без курсу.
+  //
+  // Обмежено ГРИВНЕЮ навмисно. getRate для не-UAH валюти повертає її
+  // власний курс до гривні, а формула нижче ділить на нього — для євро це
+  // дало б заниження в 55 разів. У самому парсері це поки латентне (усі
+  // чотири адаптери віддають UAH), але ремонт сканує ВСЮ таблицю, разом
+  // із рядками, які могли прийти через імпорт з довільною валютою, і
+  // проставляє priceRateDate — тобто назавжди прибирає рядок з-під
+  // детекту. Псувати такі рядки мовчки не можна.
+  private async repairUnconvertedPrices(cache: ParserRunCache, deadlineAt: number): Promise<void> {
+    const broken: { id: string; rawPrice: unknown; rawCurrency: string }[] = await this.prisma.client.sourceListing.findMany({
+      where: { priceRateDate: null, rawCurrency: 'UAH' },
+      select: { id: true, rawPrice: true, rawCurrency: true },
+      orderBy: { id: 'asc' },
+      take: REPAIR_BATCH_SIZE,
+    });
+    if (broken.length === 0) return;
+
+    const rate = await this.getRate('UAH', cache);
+    if (!rate) {
+      cache.missingRateCurrencies.add('USD');
+      this.logger.warn(`${broken.length} цін чекають на перерахунок, але курсу немає — відкладаю до появи курсу.`);
+      return;
+    }
+
+    const repairedIds: string[] = [];
+    let skipped = 0;
+
+    for (const row of broken) {
+      // Дедлайн ПЕРЕВІРЯЄТЬСЯ і тут. Ремонт іде ДО обходу вендорів, і без
+      // цієї перевірки він міг з'їсти весь бюджет прогону: у перший запуск
+      // після деплою битих рядків — увесь каталог, а кожен це окремий
+      // round-trip. Недороблене підхопить наступний прогін — рядок
+      // лишається в тій самій вибірці, поки не перерахований.
+      if (Date.now() >= deadlineAt) break;
+
+      try {
+        const priceUsd = roundToCents(Number(row.rawPrice) / rate.rateUah);
+        if (!Number.isFinite(priceUsd) || priceUsd <= 0 || priceUsd > MAX_PRICE_USD) {
+          // Найчастіше — спадок наївного розбору: склеєна сума, яка після
+          // ділення все одно не влазить у Decimal(10,2). Логуємо, інакше
+          // такий рядок мовчки сканувався б щопрогону вічно.
+          this.logger.warn(`Листинг ${row.id}: ${String(row.rawPrice)} ${row.rawCurrency} дає некоректні $${priceUsd} — потрібен повторний парсинг, пропускаю.`);
+          skipped++;
+          continue;
+        }
+
+        await this.prisma.client.sourceListing.update({
+          where: { id: row.id },
+          data: {
+            priceUsd,
+            priceRateDate: rate.rateDate,
+            // priceChangedAt НЕ чіпаємо: це виправлення нашої помилки, а
+            // не зміна ціни постачальником. Інакше в історії цін з'явився
+            // б стрибок у сорок разів без жодного відповідного запису в
+            // PriceHistoryEntry.
+          },
+        });
+        repairedIds.push(row.id);
+      } catch (err) {
+        // Ізоляція по рядку — як у обході листингів. Без неї один
+        // проблемний рядок обривав ремонт, і все, що стоїть за ним у
+        // порядку, не перераховувалось би НІКОЛИ.
+        this.logger.warn(`Не вдалося перерахувати листинг ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+        skipped++;
+      }
+    }
+
+    if (repairedIds.length === 0) return;
+
+    // Один запит на всіх, а не по одному на рядок.
+    const links: { productId: string }[] = await this.prisma.client.productListing.findMany({
+      where: { sourceListingId: { in: repairedIds } },
+      select: { productId: true },
+    });
+    for (const link of links) cache.pendingPricingProductIds.add(link.productId);
+
+    console.log(
+      `[ParserService] Перераховано ${repairedIds.length} цін, збережених без курсу (сума в гривні лежала як долари)` +
+        `${skipped > 0 ? `, ${skipped} пропущено` : ''}. Зачеплено ${new Set(links.map((l) => l.productId)).size} товарів — ` +
+        'їхній ціновий кеш оновиться в кінці прогону.',
+    );
+  }
+
   private async runForVendor(vendorId: string, vendorName: string, rawListings: RawListing[], deadlineAt: number, cache: ParserRunCache): Promise<ParserRunResult & { isComplete: boolean }> {
     let created = 0;
     let updated = 0;
     let priceChanged = 0;
     let stockChanged = 0;
     let matchAttempted = 0;
+    let skipped = 0;
 
     // Дедуплікація за sourceUrl — ОБОВʼЯЗКОВА, а не косметична. Стан "чи
     // є вже такий листинг" тепер читається ОДИН раз батчем до циклу
@@ -262,6 +389,7 @@ export class ParserService {
         if (outcome.priceChanged) priceChanged++;
         if (outcome.stockChanged) stockChanged++;
         if (outcome.matchAttempted) matchAttempted++;
+        if (outcome.skipped) skipped++;
       },
       // Збій ОКРЕМОЇ позиції більше не валить обробку всього вендора:
       // решта позицій — незалежні одна від одної, і втратити 183 через
@@ -284,6 +412,7 @@ export class ParserService {
       stockChanged,
       matchAttempted,
       failed,
+      skipped,
       isComplete,
     };
   }
@@ -331,7 +460,7 @@ export class ParserService {
   private async getRate(rawCurrency: string, cache: ParserRunCache): Promise<CachedExchangeRate | null> {
     // Історична семантика збережена як є: для UAH-цін беремо курс USD
     // (ціна з сайту в гривні ділиться на курс долара → priceUsd).
-    const currency = rawCurrency === 'UAH' ? 'USD' : rawCurrency;
+    const currency = rateCurrencyFor(rawCurrency);
     const cached = cache.exchangeRateByCurrency.get(currency);
     if (cached !== undefined) return cached;
 
@@ -346,7 +475,40 @@ export class ParserService {
 
   private async processListing(vendorId: string, raw: RawListing, existing: ExistingListing | null, cache: ParserRunCache): Promise<ListingOutcome> {
     const now = new Date();
+
+    // Остання лінія оборони перед БД. Реальний випадок 25.08.2026:
+    // селектор ціни зачепив не картку товару, усі цифри блоку склеїлись,
+    // і в Prisma полетів rawPrice: Infinity. Перевірка стоїть тут, а не
+    // лише в адаптерах, бо адаптерів чотири і кожен новий повторив би ту
+    // саму помилку.
+    if (!Number.isFinite(raw.rawPrice) || raw.rawPrice <= 0) {
+      this.logger.warn(`Пропускаю ${raw.sourceUrl}: некоректна ціна (${raw.rawPrice}) — адаптер не зміг її розібрати.`);
+      return { skipped: true };
+    }
+
     const rate = await this.getRate(raw.rawCurrency, cache);
+
+    // Курсу немає — позицію НЕ зберігаємо взагалі.
+    //
+    // Знайдено 25.08.2026 за скаргою користувача ("парсились цены в
+    // гривнах — а конвертация показала цены типа в долларах"). Тут стояло
+    // `rate ? rawPrice / rate : rawPrice`, тобто за відсутності курсу
+    // ГРИВНЕВА сума лягала в priceUsd як є. У каталозі це давало
+    // "$33 300" за акумулятор ціною 33 300 ₴ (близько $800) — помилка в
+    // сорок разів, яка тихо розтікалась далі: у націнку, в акції, у
+    // бюджет калькулятора і в рахунки. Найгірше, що відрізнити таке
+    // число від справжньої ціни постфактум нічим.
+    //
+    // Пропустити позицію на один прогін нешкідливо: курс приїде добовим
+    // джобом nbu_rate_sync, і наступний прогін збереже її вже правильно.
+    if (!rate && raw.rawCurrency !== 'USD') {
+      // Записуємо валюту, рядка якої НЕМАЄ в ExchangeRate (для
+      // гривневих цін це USD), а не валюту прайсу — інакше лог відправляв
+      // би шукати курс UAH, якого там ніколи й не було.
+      cache.missingRateCurrencies.add(rateCurrencyFor(raw.rawCurrency));
+      return { skipped: true };
+    }
+
     // Округлюємо ОДИН раз і використовуємо це саме значення і для запису,
     // і для порівняння. Спроба зберігати повне значення, а порівнювати
     // округлене, виглядає точнішою, але насправді гірша: Postgres округляє
@@ -355,7 +517,11 @@ export class ParserService {
     // рахує 8.00), даючи вічне хибне "ціна змінилась" на тих самих
     // позиціях щопрогону. Спільна арифметика прибирає цілий клас
     // розходжень; ціна — рівно та сама з точністю до копійки.
-    const priceUsd = roundToCents(rate ? raw.rawPrice / rate.rateUah : raw.rawPrice);
+    //
+    // rawCurrency === 'USD' — ціна вже в доларах, ділити її на курс
+    // гривні не можна (латентна помилка: getRate для 'USD' повертає
+    // гривневий курс долара, і ціна зменшилась би вдесятеро).
+    const priceUsd = roundToCents(raw.rawCurrency === 'USD' ? raw.rawPrice : raw.rawPrice / rate!.rateUah);
 
     if (!existing) {
       const listing = await this.prisma.client.sourceListing.create({
@@ -557,6 +723,7 @@ interface ExistingListing {
 }
 
 interface ListingOutcome {
+  skipped?: boolean;
   created?: boolean;
   updated?: boolean;
   priceChanged?: boolean;

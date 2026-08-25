@@ -181,8 +181,11 @@ export class CronService {
         // лічильник сюди, прогін, де мовчки загубилась половина товарів,
         // виглядав би в історії як бездоганний SUCCESS.
         const totalFailedListings = results.reduce((sum, r) => sum + (r.failed ?? 0), 0);
+        // Пропущені позиції — не помилки, але й не робота: найчастіше це
+        // відсутній курс валют, тобто каталог тихо не оновлюється.
+        const totalSkippedListings = results.reduce((sum, r) => sum + (r.skipped ?? 0), 0);
         return {
-          summary: `${results.length} vendors: +${totalCreated} new, ${totalUpdated} updated, ${failedVendors.length} vendors failed${totalFailedListings > 0 ? `, ${totalFailedListings} позицій з помилкою` : ''}${vendorsSkippedDueToBudget.length > 0 ? `, ${vendorsSkippedDueToBudget.length} відкладено (бюджет часу)` : ''}${isComplete ? ' — усі вендори оброблені цього циклу' : ''}`,
+          summary: `${results.length} vendors: +${totalCreated} new, ${totalUpdated} updated, ${failedVendors.length} vendors failed${totalFailedListings > 0 ? `, ${totalFailedListings} позицій з помилкою` : ''}${totalSkippedListings > 0 ? `, ${totalSkippedListings} пропущено (курс/ціна)` : ''}${vendorsSkippedDueToBudget.length > 0 ? `, ${vendorsSkippedDueToBudget.length} відкладено (бюджет часу)` : ''}${isComplete ? ' — усі вендори оброблені цього циклу' : ''}`,
           debugLog: debugMode ? { results, vendorsSkippedDueToBudget, isComplete } : undefined,
           itemsProcessed: totalCreated + totalUpdated,
           // Вендор, у якого впали ВСІ позиції, отримує ще й error — без
@@ -190,7 +193,7 @@ export class CronService {
           // як 184 проваленi позиції одночасно.
           itemsFailed: totalFailedListings + failedVendors.filter((r) => !r.failed).length,
           status:
-            failedVendors.length === 0 && totalFailedListings === 0
+            failedVendors.length === 0 && totalFailedListings === 0 && totalSkippedListings === 0
               ? 'SUCCESS'
               : failedVendors.length === results.length
                 ? 'FAILED'
@@ -203,25 +206,44 @@ export class CronService {
         // прогоні). За прямим запитом користувача — тепер лише подає
         // пачку до Grok Batch API й повертається одразу, без "translated"/
         // "failed" (результати з'являться пізніше, окремим джобом нижче).
-        const result = await this.articles.runParser();
+        // Той самий бюджет, що й у решти тайм-боксованих джобів.
+        const result = await this.articles.runParser(200_000);
+        const unrepairable = await this.articles.countUnrepairableArticles().catch(() => 0);
+        const retrySummary = result.orphanRetries > 0 ? `, повторно замовлено ${result.orphanRetries} статей` : '';
+        const budgetSummary = result.itemsSkippedByTimeBudget > 0 ? `, ${result.itemsSkippedByTimeBudget} відкладено (бюджет часу)` : '';
+        const unrepairableSummary = unrepairable > 0 ? `, ${unrepairable} остаточно без перекладу (ремонт неможливий)` : '';
+        // Пачка тепер містить не лише нові статті, а й повторні
+        // замовлення для тих, чия попередня пачка не відпрацювала. Тому
+        // успіх НЕ можна визначати по `created`: нічний прогін без
+        // новин, який переотправив 10 статей і отримав відмову від xAI,
+        // раніше відзвітував би "no new articles" зі статусом SUCCESS —
+        // тобто повністю провалений ремонт був невидимий.
+        const ordered = result.created + result.orphanRetries;
+        const submitFailed = ordered > 0 && !result.batchSubmitted;
         return {
           summary: result.batchSubmitted
-            ? `Found ${result.found}, created ${result.created}, batch ${result.xaiBatchId} submitted`
-            : `Found ${result.found}, created ${result.created}, ${result.created > 0 ? `batch submission failed: ${result.batchError}` : 'no new articles'}`,
+            ? `Found ${result.found}, created ${result.created}, batch ${result.xaiBatchId} submitted${retrySummary}${budgetSummary}${unrepairableSummary}`
+            : `Found ${result.found}, created ${result.created}${retrySummary}, ${ordered > 0 ? `batch submission failed: ${result.batchError}` : 'no new articles'}${budgetSummary}${unrepairableSummary}`,
           debugLog: debugMode ? result : undefined,
-          itemsProcessed: result.created,
-          itemsFailed: result.created > 0 && !result.batchSubmitted ? result.created : 0,
-          status: result.created === 0 || result.batchSubmitted ? 'SUCCESS' : 'FAILED',
+          // Повторні замовлення — теж виконана робота, інакше вдалий
+          // ремонтний прогін звітував би нулем оброблених.
+          itemsProcessed: ordered,
+          itemsFailed: submitFailed ? ordered : 0,
+          status: ordered === 0 || result.batchSubmitted ? 'SUCCESS' : 'FAILED',
         };
       }
       case 'article_batch_poll': {
         const result = await this.articles.processPendingBatches();
+        // givenUp — пачки, які визнані безнадійними і більше не
+        // опитуються. Це не рядова помилка окремого перекладу: показуємо
+        // окремо, інакше зникнення пачки виглядало б як тиша.
+        const givenUpSummary = result.givenUp > 0 ? `, ${result.givenUp} пачок визнано невдалими і знято з опитування` : '';
         return {
-          summary: `${result.processed} batches processed (${result.translatedTotal} translations, ${result.failedTotal} failed), ${result.stillPending} still pending`,
+          summary: `${result.processed} batches processed (${result.translatedTotal} translations, ${result.failedTotal} failed), ${result.stillPending} still pending${givenUpSummary}`,
           debugLog: debugMode ? result : undefined,
           itemsProcessed: result.translatedTotal,
-          itemsFailed: result.failedTotal,
-          status: result.failedTotal === 0 ? 'SUCCESS' : 'PARTIAL',
+          itemsFailed: result.failedTotal + result.givenUp,
+          status: result.failedTotal === 0 && result.givenUp === 0 ? 'SUCCESS' : 'PARTIAL',
         };
       }
       case 'nova_poshta_directory_sync': {
@@ -278,9 +300,13 @@ export class CronService {
         };
       }
       case 'business_plan_batch_processor': {
-        const result = await this.businessPlan.processQueue();
+        // Той самий бюджет, що й у решти тайм-боксованих джобів: 200с
+        // роботи + запас до ліміту функції.
+        const result = await this.businessPlan.processQueue(200_000);
+        const recoveredSummary = result.recovered > 0 ? `, ${result.recovered} повернуто з зависання` : '';
+        const skippedSummary = result.skipped > 0 ? `, ${result.skipped} відкладено (бюджет часу)` : '';
         return {
-          summary: `Processed ${result.processed}, completed ${result.completed}, failed ${result.failed}`,
+          summary: `Processed ${result.processed}, completed ${result.completed}, failed ${result.failed}${recoveredSummary}${skippedSummary}`,
           debugLog: debugMode ? result : undefined,
           itemsProcessed: result.completed,
           itemsFailed: result.failed,

@@ -22,6 +22,10 @@ interface ResolvedSpecItem {
 // генерирует отмеченный чек-листом пакет документов, отправляет на
 // сохранённый контакт, уведомляет менеджера. Вызывается и из крона
 // (раз в несколько минут), и вручную из админки — тот же метод.
+// Скільки проєкт може висіти в PROCESSING, перш ніж вважати його
+// осиротілим після обірваного прогону.
+const STUCK_PROCESSING_TIMEOUT_MS = 60 * 60 * 1000;
+
 @Injectable()
 export class BusinessPlanGenerationService {
   private readonly logger = new Logger(BusinessPlanGenerationService.name);
@@ -43,12 +47,59 @@ export class BusinessPlanGenerationService {
   // времени" — в этой реализации вызовы всё равно последовательные, т.к.
   // отдельного batch/async-режима у Grok API на момент имплементации не
   // подтверждено — см. AUDIT-PHASE-4.md).
-  async processQueue(): Promise<{ processed: number; completed: number; failed: number }> {
-    const queued = await this.prisma.client.projectEstimate.findMany({ where: { generationStatus: 'QUEUED' } });
+  //
+  // АУДИТ 25.08.2026 — доданий бюджет часу. Раніше цикл ішов по ВСІХ
+  // QUEUED без жодної перевірки дедлайну, а кожен проєкт це два виклики
+  // LLM з довгою генерацією. Кілька проєктів у черзі гарантовано
+  // виходили за ліміт serverless-функції, і платформа вбивала прогін
+  // ПОСЕРЕДИНІ — рівно між `generationStatus: 'PROCESSING'` і записом
+  // результату. Такий проєкт залишався в PROCESSING назавжди: жоден
+  // наступний прогін його не бачить (він забирає лише QUEUED), і ніщо в
+  // коді цей статус не скидає. Користувач чекає документи, яких уже
+  // ніхто не згенерує.
+  //
+  // Той самий тайм-бокс, що вже застосований у PVGIS, парсері та
+  // дзеркалюванні картинок: беремо стільки, скільки встигаємо, решта
+  // лишається QUEUED і дочекається наступного прогону.
+  async processQueue(timeBudgetMs = 200_000): Promise<{ processed: number; completed: number; failed: number; skipped: number; recovered: number }> {
+    // Запас під ОДНУ найважчу одиницю роботи — той самий принцип, що в
+    // парсері (30с), імпорті відгуків (70с) і PVGIS (50с). Без нього
+    // перевірка "перед взяттям наступного" не рятує: елемент, узятий на
+    // 199-й секунді, все одно перевалить за ліміт функції, і проєкт
+    // застрягне в PROCESSING — рівно та поломка, заради якої бюджет і
+    // додано. Одиниця тут найважча в проєкті: дві генерації LLM + PDF +
+    // завантаження на Blob + лист + Telegram.
+    const SAFETY_MARGIN_MS = 90_000;
+    // Без "поверху" на кшталт Math.max(..., budget/2): він спрацьовував
+    // би саме тоді, коли бюджет тісний, і мовчки залишав би на найважчу
+    // одиницю половину потрібного запасу замість усього. Якщо бюджету не
+    // вистачає навіть на одну одиницю — чесніше не взяти жодної, ніж
+    // узяти й не встигнути (саме недороблена одиниця й лишає проєкт у
+    // PROCESSING). Сусідні джоби роблять так само — простим відніманням.
+    const deadlineAt = Date.now() + timeBudgetMs - SAFETY_MARGIN_MS;
+
+    // Спершу піднімаємо тих, кого попередній прогін лишив у PROCESSING.
+    // Без цього кроку бюджет часу лише зменшує ймовірність зависання, а
+    // не лікує вже зависле.
+    const recovered = await this.recoverStuckProcessing();
+
+    const queued = await this.prisma.client.projectEstimate.findMany({
+      where: { generationStatus: 'QUEUED' },
+      orderBy: { createdAt: 'asc' },
+    });
     let completed = 0;
     let failed = 0;
+    let skipped = 0;
 
     for (const estimate of queued) {
+      // Перевірка ПЕРЕД взяттям у роботу: почату генерацію не переривають
+      // (обірваний проєкт саме так і застрягав), тому вирішуємо на вході.
+      if (Date.now() >= deadlineAt) {
+        skipped = queued.length - completed - failed;
+        this.logger.warn(`Бюджет часу вичерпано — ${skipped} проєктів лишились у черзі на наступний прогін.`);
+        break;
+      }
+
       await this.prisma.client.projectEstimate.update({ where: { id: estimate.id }, data: { generationStatus: 'PROCESSING' } });
       try {
         await this.generateForEstimate(estimate.id);
@@ -61,7 +112,23 @@ export class BusinessPlanGenerationService {
       }
     }
 
-    return { processed: queued.length, completed, failed };
+    return { processed: completed + failed, completed, failed, skipped, recovered };
+  }
+
+  // Проєкт у PROCESSING довше за розумний час — це слід від прогону, який
+  // убила платформа. Повертаємо його в QUEUED, щоб він пішов у роботу
+  // наступного разу. Поріг свідомо з великим запасом: генерація вкладається
+  // в хвилини, тож усе, що висить довше години, вже точно осиротіле.
+  private async recoverStuckProcessing(): Promise<number> {
+    const cutoff = new Date(Date.now() - STUCK_PROCESSING_TIMEOUT_MS);
+    const { count } = await this.prisma.client.projectEstimate.updateMany({
+      where: { generationStatus: 'PROCESSING', updatedAt: { lt: cutoff } },
+      data: { generationStatus: 'QUEUED' },
+    });
+    if (count > 0) {
+      this.logger.warn(`Повернуто в чергу ${count} проєктів, що зависли в PROCESSING (обірваний попередній прогін).`);
+    }
+    return count;
   }
 
   async generateForEstimate(estimateId: string): Promise<void> {

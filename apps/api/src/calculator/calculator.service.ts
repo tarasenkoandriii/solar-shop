@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ProductStatus, resolveTopologyFromGoals, buildSchemaTemplateSvg, type SchemaTopologyValue } from '@solar-shop/db';
 import { PrismaService } from '../prisma/prisma.service';
 import { GrokService, GrokCalculatorRequirements } from '../grok/grok.service';
@@ -104,6 +104,19 @@ export class CalculatorService {
       usageContext: { userId, sessionId: dto.sessionId },
     });
 
+    // АУДИТ 25.08.2026. Раніше null просто йшов далі, а
+    // resolveRequirementsToCatalog повертав на нього порожній кошик:
+    // { spec: [], totalUsd: 0, withinBudget: true }. Тобто при будь-якому
+    // збої Grok (а з 10-секундним таймаутом на reasoning-моделі це
+    // регулярна ситуація) користувач проходив увесь квіз і отримував
+    // збережений проєкт з НУЛЕМ товарів на $0.00 з позначкою "вкладається
+    // в бюджет", без жодної помилки. Чесна 503 незрівнянно краща за
+    // мовчазну порожню відповідь: користувач знає, що треба повторити.
+    if (!requirements) {
+      this.logger.error('extractCalculatorRequirements повернув null — відмовляю в старті замість збереження порожнього проєкту');
+      throw new ServiceUnavailableException('Сервіс підбору тимчасово недоступний, спробуйте ще раз за хвилину');
+    }
+
     const resolved = await this.resolveRequirementsToCatalog(
       requirements,
       dto.budgetUsd,
@@ -162,7 +175,7 @@ export class CalculatorService {
 
   async refine(estimateId: string, userId: string | null, sessionId: string | null, dto: RefineCalculatorDto) {
     // ТЗ п.31.9 — rate limit на пересчёты конкретного расчёта
-    await this.rateLimit.checkAndIncrement(`calculator:refine:${estimateId}`, 10, 600);
+    const refineWindow = await this.rateLimit.checkAndIncrement(`calculator:refine:${estimateId}`, 10, 600);
 
     const estimate = await this.getOr404(estimateId);
     this.assertOwnership(estimate, userId, sessionId);
@@ -185,6 +198,19 @@ export class CalculatorService {
       previousRequirements: lastRequirements,
       usageContext: { userId, sessionId, projectEstimateId: estimate.id },
     });
+
+    // Той самий випадок, що і в start(): порожній результат тут ще
+    // гірший — він ЗАТЕР би вже підібрану користувачем специфікацію
+    // порожнім кошиком і записав це в conversationLog як нормальну
+    // відповідь. Краще відмовити й лишити чернетку як була.
+    if (!requirements) {
+      this.logger.error(`extractCalculatorRequirements повернув null при уточненні ${estimateId} — лишаю чернетку без змін`);
+      // Повертаємо спожиту квоту: користувач не винен, що ліг Grok, а
+      // без цього десять спроб під час збою замикали б йому чернетку на
+      // десять хвилин.
+      await this.rateLimit.refund(`calculator:refine:${estimateId}`, refineWindow);
+      throw new ServiceUnavailableException('Сервіс підбору тимчасово недоступний, спробуйте ще раз за хвилину');
+    }
 
     const resolved = await this.resolveRequirementsToCatalog(
       requirements,

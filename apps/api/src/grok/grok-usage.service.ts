@@ -25,6 +25,9 @@ export interface ExpenseLogEntry {
   createdAt: Date;
 }
 
+// Стеля вибірки для зведення витрат — див. коментар у getUsageSummary.
+const SUMMARY_ROW_LIMIT = 20_000;
+
 @Injectable()
 export class GrokUsageService {
   private readonly logger = new Logger(GrokUsageService.name);
@@ -110,10 +113,24 @@ export class GrokUsageService {
   // (ітеративний квиз, не масовий парсер) це прийнятно, не проблема
   // продуктивності.
   async getUsageSummary(sinceDate?: Date): Promise<{ perUser: UserUsageSummary[]; totalCostUsd: number; totalRequests: number }> {
+    // АУДИТ 25.08.2026. Коментар вище спирався на те, що таблицю наповнює
+    // лише ітеративний квіз, "не масовий парсер". Це перестало бути
+    // правдою: тепер витрати логує і chatJson, тобто матчинг сірої зони в
+    // кроні парсера — а він пише рядки постійно і без userId. Без ліміту
+    // адмінська сторінка з часом тягла б у пам'ять усю таблицю.
+    //
+    // Беремо найсвіжіші SUMMARY_ROW_LIMIT: зріз за замовчуванням і так
+    // обмежений періодом, а якщо рядків більше — краще показати актуальні,
+    // ніж не показати нічого.
     const logs = await this.prisma.client.grokUsageLog.findMany({
       where: sinceDate ? { createdAt: { gte: sinceDate } } : undefined,
       include: { user: { select: { telegramId: true, username: true, firstName: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: SUMMARY_ROW_LIMIT,
     });
+    if (logs.length === SUMMARY_ROW_LIMIT) {
+      this.logger.warn(`Зведення витрат обрізано на ${SUMMARY_ROW_LIMIT} записах — показані найсвіжіші, підсумок занижений.`);
+    }
 
     const grouped = new Map<string, UserUsageSummary>();
     for (const log of logs) {

@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel } from './scrape-utils';
+import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel, parsePriceText } from './scrape-utils';
 import type { ISourceAdapter, RawListing } from '../adapter.interface';
 
 // akumulyator.center — приоритет №2 по ТЗ п.12.
@@ -63,7 +63,7 @@ export class AkumulyatorCenterAdapter implements ISourceAdapter {
         const sourceUrl = link.attr('href') ?? '';
         const rawTitle = link.text().trim();
         const priceText = $el.find('.ty-price-num, .product-price .price').first().text();
-        const rawPrice = parsePrice(priceText);
+        const rawPrice = parsePriceText(priceText);
         const availabilityText = $el.find('.ty-qty-in-stock, .availability').first().text();
         const outOfStock = /немає в наявності|нет в наличии|під замовлення/i.test(availabilityText);
         const image = resolveImageUrl(extractCardImage($el), url);
@@ -89,10 +89,4 @@ export class AkumulyatorCenterAdapter implements ISourceAdapter {
 
     return { listings, isComplete: true };
   }
-}
-
-function parsePrice(text: string): number | null {
-  const cleaned = text.replace(/[^\d]/g, '');
-  if (!cleaned) return null;
-  return Number(cleaned);
 }

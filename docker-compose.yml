@@ -44,6 +44,13 @@ services:
       TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN:-111111:dev-admin-placeholder-token}
       TELEGRAM_MANAGER_CHAT_ID: ${TELEGRAM_MANAGER_CHAT_ID:-}
       GROK_API_KEY: ${GROK_API_KEY:-}
+      # Додано 25.08.2026 разом із переїздом зі знятої grok-4-fast. Саме
+      # цей список — причина, чому змінну недостатньо прописати в .env:
+      # у контейнер долітає лише те, що перелічено тут (нижче вже є
+      # запис про той самий випадок із GROK_MANAGEMENT_API_KEY).
+      GROK_MODEL: ${GROK_MODEL:-}
+      GROK_BATCH_MODEL: ${GROK_BATCH_MODEL:-}
+      GROK_REASONING_EFFORT: ${GROK_REASONING_EFFORT:-}
       # За прямим запитом користувача ("but already setted... GROK_
       # MANAGEMENT_API_KEY=..." — реальний баг у власній реалізації)
       # — знайдено реальну причину: docker-compose.yml використовує

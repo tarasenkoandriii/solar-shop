@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards, BadRequestException } from '@nestjs/common';
 import { UserRole } from '@solar-shop/db';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -17,7 +17,11 @@ export class GrokUsageController {
   @Roles(UserRole.ADMIN)
   @Get('grok-usage')
   getSummary(@Query('sinceDays') sinceDays?: string) {
-    const sinceDate = sinceDays ? new Date(Date.now() - Number(sinceDays) * 24 * 60 * 60 * 1000) : undefined;
+    // АУДИТ 25.08.2026: `Number('abc')` дає NaN, з нього виходить
+    // Invalid Date, і Prisma падає 500-ю — тобто друкарська помилка в
+    // адресному рядку виглядала як поломка сервера. Плюс від'ємне або
+    // абсурдно велике значення не має сенсу для вікна звіту.
+    const sinceDate = parseSinceDays(sinceDays);
     return this.service.getUsageSummary(sinceDate);
   }
 
@@ -58,4 +62,16 @@ export class GrokUsageController {
   getExpenseLog(@Query('limit') limit?: string) {
     return this.service.getExpenseLog(limit ? Number(limit) : undefined);
   }
+}
+
+// null = без обмеження періоду (як і раніше при відсутньому параметрі).
+const MAX_SINCE_DAYS = 3650;
+
+function parseSinceDays(raw?: string): Date | undefined {
+  if (!raw) return undefined;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new BadRequestException('sinceDays має бути додатним числом днів');
+  }
+  return new Date(Date.now() - Math.min(days, MAX_SINCE_DAYS) * 24 * 60 * 60 * 1000);
 }

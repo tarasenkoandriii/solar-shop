@@ -56,12 +56,24 @@ export class GrokBatchService {
   // існуючі промпти можна переносити без переписування.
   async submitBatch(
     name: string,
-    items: { batchRequestId: string; model: string; messages: { role: string; content: string }[] }[],
+    items: {
+      batchRequestId: string;
+      model: string;
+      messages: { role: string; content: string }[];
+      // АУДИТ 25.08.2026: тип не мав цього поля, і коментар нижче
+      // стверджував, що payload той самий, що в /v1/chat/completions
+      // "model+messages+response_format" — але response_format нікуди не
+      // передавався. Тобто найбільший за обсягом шлях (до 80 генерацій
+      // статей за прогін) працював у вільнотекстовому режимі, хоча
+      // синхронні виклики JSON-режим вмикають. Звідси й регулярні
+      // невдачі розбору: модель віддавала преамбулу або огорожі.
+      responseFormat?: { type: 'json_object' };
+    }[],
   ): Promise<{ xaiBatchId: string } | { error: string }> {
     if (!this.apiKey) return { error: 'GROK_API_KEY не задано' };
     if (items.length === 0) return { error: 'Порожній список запитів для пачки' };
 
-    console.log(`[GrokBatch] Створюю пачку "${name}" (${items.length} запитів)...`);
+    this.logger.log(`[GrokBatch] Створюю пачку "${name}" (${items.length} запитів)...`);
 
     try {
       const createRes = await this.fetchWithTimeout(`${this.baseUrl}/batches`, {
@@ -79,13 +91,14 @@ export class GrokBatchService {
         return { error: `Відповідь xAI не містить ні "id", ні "batch_id": ${JSON.stringify(created).slice(0, 300)}` };
       }
 
-      console.log(`[GrokBatch] Пачка створена: ${xaiBatchId}. Додаю ${items.length} запитів...`);
+      this.logger.log(`[GrokBatch] Пачка створена: ${xaiBatchId}. Додаю ${items.length} запитів...`);
 
       const batchRequests = items.map((item) => ({
         batch_request_id: item.batchRequestId,
         batch_request: {
           chat_get_completion: {
             model: item.model,
+            ...(item.responseFormat ? { response_format: item.responseFormat } : {}),
             messages: item.messages,
           },
         },
@@ -101,7 +114,7 @@ export class GrokBatchService {
         return { error: `xAI повернув статус ${addRes.status} при додаванні запитів: ${detail.slice(0, 300)}` };
       }
 
-      console.log(`[GrokBatch] Пачка ${xaiBatchId} подана повністю (${items.length} запитів). Обробка на боці xAI — типово до 24 годин, перевірка статусу за розкладом.`);
+      this.logger.log(`[GrokBatch] Пачка ${xaiBatchId} подана повністю (${items.length} запитів). Обробка на боці xAI — типово до 24 годин, перевірка статусу за розкладом.`);
       return { xaiBatchId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -151,7 +164,7 @@ export class GrokBatchService {
     const resultsByRequestId: Record<string, string> = {};
     if (!this.apiKey) return resultsByRequestId;
 
-    console.log(`[GrokBatch] Забираю результати пачки ${xaiBatchId}...`);
+    this.logger.log(`[GrokBatch] Забираю результати пачки ${xaiBatchId}...`);
 
     try {
       let paginationToken: string | undefined;
@@ -187,7 +200,7 @@ export class GrokBatchService {
         if (!paginationToken) break;
       }
 
-      console.log(`[GrokBatch] Отримано ${Object.keys(resultsByRequestId).length} результатів з ${totalItemsSeen} елементів пачки ${xaiBatchId}.`);
+      this.logger.log(`[GrokBatch] Отримано ${Object.keys(resultsByRequestId).length} результатів з ${totalItemsSeen} елементів пачки ${xaiBatchId}.`);
     } catch (err) {
       this.logger.warn(`Не вдалося отримати результати batch ${xaiBatchId}: ${err instanceof Error ? err.message : String(err)}`);
     }

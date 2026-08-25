@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel } from './scrape-utils';
+import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel, parsePriceText } from './scrape-utils';
 import type { ISourceAdapter, RawListing } from '../adapter.interface';
 
 // sunshop.com.ua — приоритет №1 по ТЗ п.12 (узкоспециализированный, широкий
@@ -73,7 +73,7 @@ export class SunshopAdapter implements ISourceAdapter {
         const sourceUrl = link.attr('href') ?? '';
         const rawTitle = $el.find('.woocommerce-loop-product__title, h2.woocommerce-loop-product__title').first().text().trim();
         const priceText = $el.find('.price bdi, .price .amount').first().text();
-        const rawPrice = parsePrice(priceText);
+        const rawPrice = parsePriceText(priceText);
         const outOfStock = $el.hasClass('outofstock') || $el.find('.out-of-stock, .outofstock').length > 0;
         const image = resolveImageUrl(extractCardImage($el), url);
         const productIdMatch = $el.find('a[href*="add-to-cart="]').attr('href')?.match(/add-to-cart=(\d+)/);
@@ -98,10 +98,4 @@ export class SunshopAdapter implements ISourceAdapter {
 
     return { listings, isComplete: true };
   }
-}
-
-function parsePrice(text: string): number | null {
-  const cleaned = text.replace(/[^\d]/g, '');
-  if (!cleaned) return null;
-  return Number(cleaned);
 }

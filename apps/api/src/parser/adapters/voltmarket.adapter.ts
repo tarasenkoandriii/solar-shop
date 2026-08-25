@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel } from './scrape-utils';
+import { extractCardImage, resolveImageUrl, fetchCategoryPageHtml, extractPageCategoryLabel, parsePriceText } from './scrape-utils';
 import type { ISourceAdapter, RawListing } from '../adapter.interface';
 
 // voltmarket.ua — приоритет №3 по ТЗ п.12 (нишевый, хороший источник для
@@ -65,7 +65,7 @@ export class VoltmarketAdapter implements ISourceAdapter {
         const sourceUrl = link.attr('href') ?? '';
         const rawTitle = link.text().trim();
         const priceText = $el.find('.price, .price-new').first().text();
-        const rawPrice = parsePrice(priceText);
+        const rawPrice = parsePriceText(priceText);
         const skuText = $el.text().match(/Код товара:\s*(\d+)/)?.[1];
         const image = resolveImageUrl(extractCardImage($el), url);
 
@@ -89,10 +89,4 @@ export class VoltmarketAdapter implements ISourceAdapter {
 
     return { listings, isComplete: true };
   }
-}
-
-function parsePrice(text: string): number | null {
-  const cleaned = text.replace(/[^\d]/g, '');
-  if (!cleaned) return null;
-  return Number(cleaned);
 }

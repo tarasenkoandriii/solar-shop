@@ -44,6 +44,11 @@ export interface CachedExchangeRate {
 export interface ParserRunCache {
   /** currency -> курс (null = курсу для цієї валюти в БД немає) */
   exchangeRateByCurrency: Map<string, CachedExchangeRate | null>;
+  // Валюти, для яких курсу не знайшлось. Позиції в них свідомо
+  // пропускаються (записати гривню в поле доларів гірше, ніж не записати
+  // нічого), але прогін має сказати про це вголос — інакше каталог тихо
+  // недорахується, і причина буде невідома.
+  missingRateCurrencies: Set<string>;
   /** categoryKey -> опубліковані товари-кандидати з передрозібраними specs */
   candidatesByCategory: Map<string, CandidateProduct[]>;
   /** Ключ — пара (internalKey, siteCategoryLabel), див. categoryCacheKey. */
@@ -126,6 +131,7 @@ export function consumeLlmBudget(cache: ParserRunCache): boolean {
 export function createParserRunCache(llm: LlmBudget): ParserRunCache {
   return {
     exchangeRateByCurrency: new Map(),
+    missingRateCurrencies: new Set(),
     candidatesByCategory: new Map(),
     categoryKeyByLabel: new Map(),
     categoryPrefixByKey: new Map(),

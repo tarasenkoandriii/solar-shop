@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Logger, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Logger, Param, Post, Put, Query, UseGuards, ServiceUnavailableException } from '@nestjs/common';
 import { UserRole } from '@solar-shop/db';
 import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
@@ -42,7 +42,12 @@ export class CalculatorController {
     try {
       return await this.service.start(user?.sub ?? null, dto);
     } catch (err) {
-      if (err instanceof BadRequestException) throw err;
+      // ServiceUnavailableException пропускаємо як є: обгортання її в 400
+      // означало б казати клієнту "твій запит некоректний" там, де
+      // насправді ліг наш зовнішній сервіс. Будь-який ретрай-шар, монітор
+      // аптайму чи CDN трактує 4xx як "не повторювати" — і збій став би
+      // невидимим для алертів на 5xx.
+      if (err instanceof BadRequestException || err instanceof ServiceUnavailableException) throw err;
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`calculator/start провалився: ${message}`, err instanceof Error ? err.stack : undefined);
       throw new BadRequestException(`Не вдалося створити розрахунок: ${message}`);
