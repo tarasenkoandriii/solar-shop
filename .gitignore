@@ -39,3 +39,6 @@ npm-debug.log*
 
 # Vercel
 .vercel/
+
+apps/api/api/*.js
+apps/api/api/*.js.map
