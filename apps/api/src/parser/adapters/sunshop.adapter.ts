@@ -26,15 +26,18 @@ export class SunshopAdapter implements ISourceAdapter {
     CONTROLLER: 'https://sunshop.com.ua/uk/cat/energy-uk/controllers-uk/',
   };
 
-  async fetchListings(): Promise<RawListing[]> {
+  async fetchListings(deadlineAt: number): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const results: RawListing[] = [];
     for (const [category, url] of Object.entries(this.categoryUrls)) {
-      results.push(...(await this.fetchCategory(url, category)));
+      if (Date.now() >= deadlineAt) return { listings: results, isComplete: false };
+      const { listings, isComplete } = await this.fetchCategory(url, category, deadlineAt);
+      results.push(...listings);
+      if (!isComplete) return { listings: results, isComplete: false };
     }
-    return results;
+    return { listings: results, isComplete: true };
   }
 
-  private async fetchCategory(baseUrl: string, rawCategory: string, maxPages = 10): Promise<RawListing[]> {
+  private async fetchCategory(baseUrl: string, rawCategory: string, deadlineAt: number, maxPages = 10): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const listings: RawListing[] = [];
     // За прямим запитом користувача ("сохранять сырые категории с
     // сайтов") — мітка категорії, як сама сторінка її показує (H1),
@@ -44,6 +47,11 @@ export class SunshopAdapter implements ISourceAdapter {
     let siteCategoryLabel: string | null = null;
 
     for (let page = 1; page <= maxPages; page++) {
+      // За прямим запитом користувача — "добавить тайм менеджмент" —
+      // перевірка ПЕРЕД кожним HTTP-запитом (не лише між категоріями),
+      // саме тут раніше зависав весь прогін довше HTTP-таймауту Vercel.
+      if (Date.now() >= deadlineAt) return { listings, isComplete: false };
+
       const url = page === 1 ? baseUrl : `${baseUrl}page/${page}/`;
       // За прямим запитом користувача — розширений набір селекторів
       // картинки + опційний headless-фолбек для JS-рендерингу
@@ -88,7 +96,7 @@ export class SunshopAdapter implements ISourceAdapter {
       if (products.length < 40) break; // sunshop отдаёт по 40 на страницу — меньше значит конец списка
     }
 
-    return listings;
+    return { listings, isComplete: true };
   }
 }
 

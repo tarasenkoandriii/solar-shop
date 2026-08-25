@@ -19,19 +19,26 @@ export class VenconAdapter implements ISourceAdapter {
     CONTROLLER: 'https://vencon.ua/ua/catalog/kontrollery-zaryada',
   };
 
-  async fetchListings(): Promise<RawListing[]> {
+  async fetchListings(deadlineAt: number): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const results: RawListing[] = [];
     for (const [category, url] of Object.entries(this.categoryUrls)) {
-      results.push(...(await this.fetchCategory(url, category)));
+      if (Date.now() >= deadlineAt) return { listings: results, isComplete: false };
+      const { listings, isComplete } = await this.fetchCategory(url, category, deadlineAt);
+      results.push(...listings);
+      if (!isComplete) return { listings: results, isComplete: false };
     }
-    return results;
+    return { listings: results, isComplete: true };
   }
 
-  private async fetchCategory(baseUrl: string, rawCategory: string, maxPages = 10): Promise<RawListing[]> {
+  private async fetchCategory(baseUrl: string, rawCategory: string, deadlineAt: number, maxPages = 10): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const listings: RawListing[] = [];
     let siteCategoryLabel: string | null = null;
 
     for (let page = 1; page <= maxPages; page++) {
+      // За прямим запитом користувача — "добавить тайм менеджмент"
+      // (той самий підхід, що вже sunshop.adapter.ts).
+      if (Date.now() >= deadlineAt) return { listings, isComplete: false };
+
       const url = page === 1 ? baseUrl : `${baseUrl}?page=${page}`;
       const { html, httpOk } = await fetchCategoryPageHtml(url);
       if (!httpOk) break;
@@ -74,7 +81,7 @@ export class VenconAdapter implements ISourceAdapter {
       if (products.length < 20) break;
     }
 
-    return listings;
+    return { listings, isComplete: true };
   }
 }
 

@@ -26,20 +26,27 @@ export class AkumulyatorCenterAdapter implements ISourceAdapter {
     BATTERY: 'https://akumulyator.center/avtomobilni-akumulyatori/litiievi-akumulyatori/lifepo4/',
   };
 
-  async fetchListings(): Promise<RawListing[]> {
+  async fetchListings(deadlineAt: number): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const results: RawListing[] = [];
     for (const [category, url] of Object.entries(this.categoryUrls)) {
       if (!url) continue;
-      results.push(...(await this.fetchCategory(url, category)));
+      if (Date.now() >= deadlineAt) return { listings: results, isComplete: false };
+      const { listings, isComplete } = await this.fetchCategory(url, category, deadlineAt);
+      results.push(...listings);
+      if (!isComplete) return { listings: results, isComplete: false };
     }
-    return results;
+    return { listings: results, isComplete: true };
   }
 
-  private async fetchCategory(baseUrl: string, rawCategory: string, maxPages = 8): Promise<RawListing[]> {
+  private async fetchCategory(baseUrl: string, rawCategory: string, deadlineAt: number, maxPages = 8): Promise<{ listings: RawListing[]; isComplete: boolean }> {
     const listings: RawListing[] = [];
     let siteCategoryLabel: string | null = null;
 
     for (let page = 1; page <= maxPages; page++) {
+      // За прямим запитом користувача — "добавить тайм менеджмент"
+      // (той самий підхід, що вже sunshop.adapter.ts).
+      if (Date.now() >= deadlineAt) return { listings, isComplete: false };
+
       const url = page === 1 ? baseUrl : `${baseUrl}page-${page}/`;
       const { html, httpOk } = await fetchCategoryPageHtml(url);
       if (!httpOk) break;
@@ -80,7 +87,7 @@ export class AkumulyatorCenterAdapter implements ISourceAdapter {
       if (products.length < 10) break;
     }
 
-    return listings;
+    return { listings, isComplete: true };
   }
 }
 

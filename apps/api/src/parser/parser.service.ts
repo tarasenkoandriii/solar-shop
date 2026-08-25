@@ -74,8 +74,31 @@ export class ParserService {
 
       console.log(`[ParserService] Обробляю вендора "${vendor.name}"...`);
       try {
-        results.push(await this.runForVendor(vendor.id, adapter.vendorName, await adapter.fetchListings()));
-        await this.prisma.client.vendor.update({ where: { id: vendor.id }, data: { lastFullyParsedAt: new Date() } });
+        // За прямим запитом користувача — "добавить тайм менеджмент и
+        // сделать идемпотентным" (повторний запит на РЕАЛЬНИЙ прогін,
+        // де sunshop.com.ua завис довше за весь HTTP-таймаут Vercel,
+        // 300с — попередня тайм-боксація МІЖ вендорами не рятувала від
+        // зависання ВСЕРЕДИНІ одного). Дедлайн — залишок ЗАГАЛЬНОГО
+        // бюджету цього прогону, не фіксоване число — якщо на цього
+        // вендора лишилось мало часу, адаптер сам це побачить і
+        // перерве обхід рано, повернувши часткові дані.
+        const deadlineAt = startedAt + timeBudgetMs - SAFETY_MARGIN_MS;
+        const { listings, isComplete } = await adapter.fetchListings(deadlineAt);
+        results.push(await this.runForVendor(vendor.id, adapter.vendorName, listings));
+        // lastFullyParsedAt оновлюється ЛИШЕ якщо адаптер реально
+        // завершив обхід усіх категорій/сторінок — часткові дані вже
+        // збережені (ідемпотентно, upsert по sourceUrl), АЛЕ вендор
+        // лишається "не до кінця обробленим" і знову буде першим у
+        // черзі наступного прогону (ordered by lastFullyParsedAt).
+        if (isComplete) {
+          await this.prisma.client.vendor.update({ where: { id: vendor.id }, data: { lastFullyParsedAt: new Date() } });
+        } else {
+          console.log(`[ParserService] "${vendor.name}": бюджет часу вичерпано під час обходу, зібрано ${listings.length} позицій — продовжимо з початку наступного разу.`);
+          vendorsSkippedDueToBudget.push(vendor.name);
+          // Час на ЦЬОГО вендора вже вичерпано — йти далі по решті
+          // вендорів цього прогону немає сенсу, весь бюджет витрачено.
+          break;
+        }
       } catch (err) {
         this.logger.error(`Adapter ${vendor.name} failed`, err as Error);
         results.push({
