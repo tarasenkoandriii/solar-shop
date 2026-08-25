@@ -10,8 +10,6 @@ import { EmailService } from '../email/email.service';
 import { NotifyService } from '../notify/notify.service';
 import { StartCalculatorDto, RefineCalculatorDto, UpdateSpecDto, SendPackageDto } from './dto/calculator.dto';
 
-const MAX_DRAFTS_PER_OWNER = 5; // ТЗ п.31.7 — мягкое ограничение, не жёсткий лимит
-
 interface ResolvedSpecItem {
   productId: string;
   articleNumber: string;
@@ -95,8 +93,6 @@ export class CalculatorService {
   // ---- Шаг 1: старт квиза (ТЗ п.31.1-31.4) ----
 
   async start(userId: string | null, dto: StartCalculatorDto) {
-    await this.assertDraftLimitNotExceeded(userId, dto.sessionId ?? null);
-
     const goalRecords = await this.prisma.client.projectGoal.findMany({ where: { key: { in: dto.goals } } });
     const topology = resolveTopologyFromGoals(goalRecords.map((g) => g.defaultTopology));
 
@@ -539,15 +535,10 @@ export class CalculatorService {
     throw new ForbiddenException('Розрахунок не має власника — доступ заборонено');
   }
 
-  private async assertDraftLimitNotExceeded(userId: string | null, sessionId: string | null) {
-    const where = userId ? { userId, status: 'DRAFT' as const } : { sessionId, status: 'DRAFT' as const };
-    const count = await this.prisma.client.projectEstimate.count({ where });
-    if (count >= MAX_DRAFTS_PER_OWNER) {
-      throw new BadRequestException(
-        `Забагато незавершених чернеток проєктів (${MAX_DRAFTS_PER_OWNER}) — завершіть або видаліть існуючі перед створенням нового`,
-      );
-    }
-  }
+  // За прямим запитом користувача — "не нужно ограничивать количество
+  // черновиков". Раніше тут був м'який ліміт (MAX_DRAFTS_PER_OWNER=5,
+  // ТЗ п.31.7) — метод assertDraftLimitNotExceeded() і виклик у
+  // start() прибрано повністю, не просто збільшено число.
 
   // ТЗ п.31.4 — детерминированный резолвинг требований Grok в реальный каталог.
   // Всегда берём самый дешёвый подходящий вариант по каждой категории — это

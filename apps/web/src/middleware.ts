@@ -5,17 +5,6 @@ export const config = {
   matcher: ['/((?!_next|api|embed|favicon.ico|robots.txt|sitemap.xml|.*\\..*).*)'],
 };
 
-function pickLocaleFromAcceptLanguage(header: string | null): Locale | null {
-  if (!header) return null;
-  const preferred = header
-    .split(',')
-    .map((part) => part.split(';')[0].trim().slice(0, 2).toLowerCase());
-  for (const lang of preferred) {
-    if ((locales as readonly string[]).includes(lang)) return lang as Locale;
-  }
-  return null;
-}
-
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -24,23 +13,19 @@ export function middleware(request: NextRequest) {
   );
   if (pathnameHasLocale) return NextResponse.next();
 
-  // ТЗ п.29.2: cookie > Accept-Language > x-vercel-ip-country (UA -> uk) > default.
-  // Заголовки x-vercel-ip-* доступны только за Vercel Edge Network — в Docker
-  // Compose (ТЗ п.29 warning) их не будет, поэтому везде безопасный фолбэк.
+  // За прямим запитом користувача — "по умолчанию при первом запуске
+  // поставь украинский язык если пользователь явно не выбрал -
+  // политика банка. для всего сайда дефаулт - украинский". Раніше тут
+  // був автоматичний вибір за Accept-Language заголовком браузера і
+  // geo-IP (x-vercel-ip-country) — ОБИДВА це вгадування БЕЗ явної дії
+  // користувача, не "вибір" у сенсі бізнес-вимоги. Єдине джерело, що
+  // рахується явним вибором — cookie NEXT_LOCALE, який встановлюється
+  // ЛИШЕ коли людина сама натискає перемикач мови на сайті. Немає
+  // cookie — завжди defaultLocale ('uk'), незалежно від мови браузера
+  // чи країни за IP.
   const cookieLocale = request.cookies.get('NEXT_LOCALE')?.value;
-  let locale: Locale = defaultLocale;
-
-  if (cookieLocale && (locales as readonly string[]).includes(cookieLocale)) {
-    locale = cookieLocale as Locale;
-  } else {
-    const fromHeader = pickLocaleFromAcceptLanguage(request.headers.get('accept-language'));
-    if (fromHeader) {
-      locale = fromHeader;
-    } else {
-      const country = request.headers.get('x-vercel-ip-country');
-      locale = country === 'UA' ? 'uk' : 'en';
-    }
-  }
+  const locale: Locale =
+    cookieLocale && (locales as readonly string[]).includes(cookieLocale) ? (cookieLocale as Locale) : defaultLocale;
 
   const url = request.nextUrl.clone();
   url.pathname = `/${locale}${pathname === '/' ? '' : pathname}`;

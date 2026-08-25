@@ -21,19 +21,6 @@ out/
 # NestJS build output
 apps/api/dist/
 
-# За прямим запитом користувача (реальна помилка деплою Vercel —
-# "The path api/index.js has conflicts with api/index.ts") —
-# apps/api/api/index.ts свідомо НЕ компілюється в dist/, це окремий
-# Vercel zero-config serverless entrypoint (не частина основного
-# tsconfig.json rootDir/outDir), тому TS-компілятор при локальному
-# запуску кладе .js/.js.map ПОРУЧ із джерелом за замовчуванням — Vercel
-# бачить ОБИДВА файли з однаковою назвою без розширення (api/index) і
-# не може вирішити, який використати. Ці 2 рядки — не про "build
-# output взагалі" (те вже покрито apps/api/dist/ вище), а саме про
-# цю конкретну, раніше НЕ захищену теку.
-apps/api/api/*.js
-apps/api/api/*.js.map
-
 # Prisma
 packages/db/node_modules/
 packages/db/dist/
