@@ -39,16 +39,20 @@ export class ParserService {
   // одному, поки не вичерпається бюджет часу — той самий природний
   // "кеш і є прогресом" принцип, що вже в SolarYieldEstimate, тут через
   // Vendor.lastFullyParsedAt.
-  async runAll(timeBudgetMs = 200_000): Promise<{ results: ParserRunResult[]; vendorsSkippedDueToBudget: string[]; isComplete: boolean }> {
+  async runAll(timeBudgetMs = 260_000): Promise<{ results: (ParserRunResult & { isComplete?: boolean })[]; vendorsSkippedDueToBudget: string[]; isComplete: boolean }> {
     const startedAt = Date.now();
-    // Найгірший випадок одного вендора — важко оцінити наперед (залежить
-    // від кількості товарів на сайті, вже і так time-boxed запитами
-    // всередині fetchCategoryPageHtml — timeoutMs:15_000, retries:2), тому
-    // запас тут щедріший, ніж для одиночного PVGIS-виклику: 30с — час на
-    // "долити" вже розпочатий вендор, не переривати його жорстко на
-    // півдорозі (недороблений вендор просто спробується знову наступного
-    // разу, ідемпотентно, не втрачаючи вже збереного).
+    // За прямим запитом користувача — "добавить тайм менеджмент"
+    // (повторний запит на РЕАЛЬНИЙ production-збій: попередній фікс
+    // тайм-боксував лише фазу СКРЕЙПІНГУ — ОБРОБКА зібраних даних
+    // (upsert + matching engine, мінімум 2-3 послідовних DB-запити на
+    // кожен listing через Supabase-пулер) НЕ мала жодного бюджету
+    // взагалі, для сотень listings легко сумувалась у десятки-сотні
+    // секунд ПОНАД уже витрачений на скрейпінг час). Тепер ОДИН
+    // спільний дедлайн на ОБИДВІ фази (не окремі бюджети для кожної)
+    // — і адаптер (збір), і runForVendor() (обробка) перевіряють той
+    // самий deadlineAt, що обчислюється ОДИН раз тут.
     const SAFETY_MARGIN_MS = 30_000;
+    const deadlineAt = startedAt + timeBudgetMs - SAFETY_MARGIN_MS;
 
     const neverParsed = await this.prisma.client.vendor.findMany({
       where: { isActive: true, lastFullyParsedAt: null },
@@ -60,11 +64,11 @@ export class ParserService {
     });
     const orderedVendors = [...neverParsed, ...previouslyParsed];
 
-    const results: ParserRunResult[] = [];
+    const results: (ParserRunResult & { isComplete?: boolean })[] = [];
     const vendorsSkippedDueToBudget: string[] = [];
 
     for (const vendor of orderedVendors) {
-      if (Date.now() - startedAt > timeBudgetMs - SAFETY_MARGIN_MS) {
+      if (Date.now() >= deadlineAt) {
         vendorsSkippedDueToBudget.push(vendor.name);
         continue;
       }
@@ -74,29 +78,31 @@ export class ParserService {
 
       console.log(`[ParserService] Обробляю вендора "${vendor.name}"...`);
       try {
-        // За прямим запитом користувача — "добавить тайм менеджмент и
-        // сделать идемпотентным" (повторний запит на РЕАЛЬНИЙ прогін,
-        // де sunshop.com.ua завис довше за весь HTTP-таймаут Vercel,
-        // 300с — попередня тайм-боксація МІЖ вендорами не рятувала від
-        // зависання ВСЕРЕДИНІ одного). Дедлайн — залишок ЗАГАЛЬНОГО
-        // бюджету цього прогону, не фіксоване число — якщо на цього
-        // вендора лишилось мало часу, адаптер сам це побачить і
-        // перерве обхід рано, повернувши часткові дані.
-        const deadlineAt = startedAt + timeBudgetMs - SAFETY_MARGIN_MS;
-        const { listings, isComplete } = await adapter.fetchListings(deadlineAt);
-        results.push(await this.runForVendor(vendor.id, adapter.vendorName, listings));
-        // lastFullyParsedAt оновлюється ЛИШЕ якщо адаптер реально
-        // завершив обхід усіх категорій/сторінок — часткові дані вже
-        // збережені (ідемпотентно, upsert по sourceUrl), АЛЕ вендор
-        // лишається "не до кінця обробленим" і знову буде першим у
-        // черзі наступного прогону (ordered by lastFullyParsedAt).
-        if (isComplete) {
+        const { listings, isComplete: scrapeComplete } = await adapter.fetchListings(deadlineAt);
+        const vendorResult = await this.runForVendor(vendor.id, adapter.vendorName, listings, deadlineAt);
+        results.push(vendorResult);
+        // lastFullyParsedAt оновлюється ЛИШЕ якщо ОБИДВІ фази (і
+        // скрейпінг, і обробка) реально завершились повністю —
+        // часткові дані вже збережені (ідемпотентно, upsert по
+        // sourceUrl), АЛЕ вендор лишається "не до кінця обробленим" і
+        // знову буде першим у черзі наступного прогону (ordered by
+        // lastFullyParsedAt).
+        const isVendorComplete = scrapeComplete && vendorResult.isComplete;
+        if (isVendorComplete) {
           await this.prisma.client.vendor.update({ where: { id: vendor.id }, data: { lastFullyParsedAt: new Date() } });
         } else {
-          console.log(`[ParserService] "${vendor.name}": бюджет часу вичерпано під час обходу, зібрано ${listings.length} позицій — продовжимо з початку наступного разу.`);
+          console.log(`[ParserService] "${vendor.name}": бюджет часу вичерпано (${!scrapeComplete ? 'на скрейпінгу' : 'на обробці'}), зібрано ${listings.length} позицій — продовжимо з початку наступного разу.`);
           vendorsSkippedDueToBudget.push(vendor.name);
-          // Час на ЦЬОГО вендора вже вичерпано — йти далі по решті
-          // вендорів цього прогону немає сенсу, весь бюджет витрачено.
+          // Час уже вичерпано — йти далі по решті вендорів цього
+          // прогону немає сенсу, весь бюджет витрачено. Явно
+          // позначаємо ВСІХ, хто ще не встиг навіть почати цього
+          // прогону — інакше vendorsSkippedDueToBudget був би
+          // неповним для діагностики (хоча загальний isComplete
+          // флаг і так коректний завдяки одному запису вище).
+          const remainingVendorNames = orderedVendors
+            .slice(orderedVendors.indexOf(vendor) + 1)
+            .map((v) => v.name);
+          vendorsSkippedDueToBudget.push(...remainingVendorNames);
           break;
         }
       } catch (err) {
@@ -125,7 +131,12 @@ export class ParserService {
     return { results, vendorsSkippedDueToBudget, isComplete };
   }
 
-  private async runForVendor(vendorId: string, vendorName: string, rawListings: RawListing[]): Promise<ParserRunResult> {
+  private async runForVendor(
+    vendorId: string,
+    vendorName: string,
+    rawListings: RawListing[],
+    deadlineAt: number,
+  ): Promise<ParserRunResult & { isComplete: boolean }> {
     let created = 0;
     let updated = 0;
     let priceChanged = 0;
@@ -133,6 +144,19 @@ export class ParserService {
     let matchAttempted = 0;
 
     for (const raw of rawListings) {
+      // За прямим запитом користувача — "добавить тайм менеджмент"
+      // (повторний запит на РЕАЛЬНИЙ production-збій: попередній фікс
+      // тайм-боксував лише фазу СКРЕЙПІНГУ, АЛЕ ОБРОБКА зібраних даних
+      // тут — мінімум 2-3 послідовних DB-запити на кожен listing
+      // (Supabase через пулер, кожен запит окремий мережевий round-
+      // trip) + matching engine — для сотень listings легко сумується
+      // у десятки-сотні секунд ПОНАД уже витрачений на скрейпінг час.
+      // Один спільний дедлайн на ОБИДВІ фази (не окремі бюджети) —
+      // перевіряється тут так само, як усередині кожного адаптера.
+      if (Date.now() >= deadlineAt) {
+        return { vendorName, fetched: rawListings.length, created, updated, priceChanged, stockChanged, matchAttempted, isComplete: false };
+      }
+
       const existing = await this.prisma.client.sourceListing.findUnique({
         where: { vendorId_sourceUrl: { vendorId, sourceUrl: raw.sourceUrl } },
       });
@@ -221,6 +245,6 @@ export class ParserService {
       updated++;
     }
 
-    return { vendorName, fetched: rawListings.length, created, updated, priceChanged, stockChanged, matchAttempted };
+    return { vendorName, fetched: rawListings.length, created, updated, priceChanged, stockChanged, matchAttempted, isComplete: true };
   }
 }

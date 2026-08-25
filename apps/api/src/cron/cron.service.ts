@@ -150,7 +150,12 @@ export class CronService {
   }> {
     switch (jobKey) {
       case 'product_parser': {
-        const { results, vendorsSkippedDueToBudget, isComplete } = await this.parser.runAll();
+        // За прямим запитом користувача — "добавить тайм менеджмент"
+        // — явно передаємо бюджет тут (не покладаємось мовчки на
+        // дефолт runAll()), синхронізовано з реальним HTTP-таймаутом
+        // Vercel (300с) — 260с бюджету + 30с safety margin усередині
+        // runAll() = 290с найгірший випадок, 10с запасу.
+        const { results, vendorsSkippedDueToBudget, isComplete } = await this.parser.runAll(260_000);
         const totalCreated = results.reduce((s, r) => s + r.created, 0);
         const totalUpdated = results.reduce((s, r) => s + r.updated, 0);
         const failedVendors = results.filter((r) => r.error);
