@@ -1,7 +1,7 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
+import { ProductPhoto } from '../../../components/ProductPhoto';
 import { useParams, useRouter } from 'next/navigation';
 import { useCart } from '../../../lib/cart-context';
 import { useExchangeRate } from '../../../lib/use-exchange-rate';
@@ -41,7 +41,7 @@ export default function CartPage() {
               <div key={item.id} className="flex items-center gap-4 rounded-2xl border border-leaf-800/10 p-4">
                 <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-leaf-50">
                   {item.product.images[0] && (
-                    <Image src={item.product.images[0].url} alt={item.product.name} fill className="object-cover" />
+                    <ProductPhoto src={item.product.images[0].url} alt={item.product.name} sizes="80px" />
                   )}
                 </div>
                 <div className="flex-1">

@@ -11,6 +11,7 @@ import { FinancingService } from '../financing/financing.service';
 import { BusinessPlanGenerationService } from '../business-plan/business-plan-generation.service';
 import { SolarMapService } from '../solar-map/solar-map.service';
 import { ProductReviewImportService } from '../parser/product-review-import.service';
+import { ProductImageMirrorService } from '../parser/product-image-mirror.service';
 
 export type JobKey =
   | 'product_parser'
@@ -23,7 +24,8 @@ export type JobKey =
   | 'financing_program_parser'
   | 'business_plan_batch_processor'
   | 'pvgis_country_grid'
-  | 'product_review_parser';
+  | 'product_review_parser'
+  | 'product_image_mirror';
 
 // Реестр джобов — статический список в коде (ТЗ п.27.1), расписание живёт
 // в конфигурации Supabase pg_cron снаружи, не редактируется через UI.
@@ -67,6 +69,20 @@ export const JOB_REGISTRY: { jobKey: JobKey; description: string }[] = [
     // в RUNNING (розділ README) при десятках listings послідовно.
     description: 'Обхід пов\'язаних SourceListing, парсинг відгуків із сайтів-джерел (де підключений адаптер), дедуплікація за хешем вмісту — тайм-боксовано ~200с, не встигле лишається на наступний прогін',
   },
+  {
+    jobKey: 'product_image_mirror',
+    // За прямим запитом користувача — "полностью сделай через блоб".
+    // Картинки товарів приходять з доменів постачальників, а next/image
+    // пропускає лише домени з images.remotePatterns — звідси биті іконки
+    // в каталозі. Джоб поступово переносить фото на Vercel Blob (він у
+    // allowlist), після чого оптимізація вмикається сама.
+    //
+    // ОКРЕМИЙ джоб, а не частина product_parser: завантаження файлу
+    // коштує на порядок більше за запит до БД, а парсер і без того ледве
+    // вкладався в ліміт Vercel. Розклад — раз у декілька хвилин, поки
+    // черга не спорожніє; далі ідемпотентно нічого не робить.
+    description: 'Перенесення картинок товарів із сайтів постачальників на Vercel Blob (дедуплікація за оригінальним URL) — тайм-боксовано ~200с, решта лишається на наступний прогін',
+  },
 ];
 
 @Injectable()
@@ -84,6 +100,7 @@ export class CronService {
     private readonly businessPlan: BusinessPlanGenerationService,
     private readonly solarMap: SolarMapService,
     private readonly productReviewImport: ProductReviewImportService,
+    private readonly productImageMirror: ProductImageMirrorService,
   ) {}
 
   getRegistry() {
@@ -159,12 +176,25 @@ export class CronService {
         const totalCreated = results.reduce((s, r) => s + r.created, 0);
         const totalUpdated = results.reduce((s, r) => s + r.updated, 0);
         const failedVendors = results.filter((r) => r.error);
+        // Окремі позиції тепер можуть впасти, не роняючи вендора
+        // (ParserService.runForVendor ізолює їх). Якщо не підняти цей
+        // лічильник сюди, прогін, де мовчки загубилась половина товарів,
+        // виглядав би в історії як бездоганний SUCCESS.
+        const totalFailedListings = results.reduce((sum, r) => sum + (r.failed ?? 0), 0);
         return {
-          summary: `${results.length} vendors: +${totalCreated} new, ${totalUpdated} updated, ${failedVendors.length} failed${vendorsSkippedDueToBudget.length > 0 ? `, ${vendorsSkippedDueToBudget.length} відкладено (бюджет часу)` : ''}${isComplete ? ' — усі вендори оброблені цього циклу' : ''}`,
+          summary: `${results.length} vendors: +${totalCreated} new, ${totalUpdated} updated, ${failedVendors.length} vendors failed${totalFailedListings > 0 ? `, ${totalFailedListings} позицій з помилкою` : ''}${vendorsSkippedDueToBudget.length > 0 ? `, ${vendorsSkippedDueToBudget.length} відкладено (бюджет часу)` : ''}${isComplete ? ' — усі вендори оброблені цього циклу' : ''}`,
           debugLog: debugMode ? { results, vendorsSkippedDueToBudget, isComplete } : undefined,
           itemsProcessed: totalCreated + totalUpdated,
-          itemsFailed: failedVendors.length,
-          status: failedVendors.length === 0 ? 'SUCCESS' : failedVendors.length === results.length ? 'FAILED' : 'PARTIAL',
+          // Вендор, у якого впали ВСІ позиції, отримує ще й error — без
+          // цієї поправки він рахувався б і як один провалений вендор, і
+          // як 184 проваленi позиції одночасно.
+          itemsFailed: totalFailedListings + failedVendors.filter((r) => !r.failed).length,
+          status:
+            failedVendors.length === 0 && totalFailedListings === 0
+              ? 'SUCCESS'
+              : failedVendors.length === results.length
+                ? 'FAILED'
+                : 'PARTIAL',
         };
       }
       case 'article_parser': {
@@ -285,6 +315,30 @@ export class CronService {
           itemsProcessed: result.reviewsCreated,
           itemsFailed: 0,
           status: 'SUCCESS',
+        };
+      }
+      case 'product_image_mirror': {
+        const r = await this.productImageMirror.runMirror(200_000);
+        if (r.skippedReason) {
+          // Сховище не налаштоване — це НЕ помилка прогону: картинки
+          // працюють на прямих посиланнях. Але й SUCCESS писати не можна,
+          // інакше "нічого не зроблено" виглядало б як "все готово".
+          return {
+            summary: `Пропущено: ${r.skippedReason} У черзі ${r.pending} картинок.`,
+            debugLog: debugMode ? r : undefined,
+            itemsProcessed: 0,
+            itemsFailed: 0,
+            status: r.pending === 0 ? 'SUCCESS' : 'PARTIAL',
+          };
+        }
+        const dedupSummary = r.deduped > 0 ? `, ${r.deduped} перевикористано вже завантажених` : '';
+        const givenUpSummary = r.givenUp > 0 ? `, ${r.givenUp} остаточно лишились на прямому посиланні` : '';
+        return {
+          summary: `Перенесено на Blob ${r.mirrored} картинок${dedupSummary} за ${Math.round(r.elapsedMs / 1000)}с${givenUpSummary}${r.remaining > 0 ? `, лишилось ${r.remaining} на наступний прогін` : ' — черга порожня'}`,
+          debugLog: debugMode ? r : undefined,
+          itemsProcessed: r.mirrored + r.deduped,
+          itemsFailed: r.failed,
+          status: r.failed === 0 ? 'SUCCESS' : r.mirrored + r.deduped === 0 ? 'FAILED' : 'PARTIAL',
         };
       }
       default:

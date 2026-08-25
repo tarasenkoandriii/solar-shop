@@ -1,12 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Image from 'next/image';
 import { useParams } from 'next/navigation';
 import { isLocale, type Locale } from '../../../../../lib/i18n';
 import { getDictionary } from '../../../../../lib/get-dictionary';
 import { clientApi } from '../../../../../lib/client-api';
 import { PriceTag } from '../../../../../components/PriceTag';
+import { ProductPhoto } from '../../../../../components/ProductPhoto';
 import { useExchangeRate } from '../../../../../lib/use-exchange-rate';
 import type { Order } from '../../../../../lib/api';
 
@@ -37,7 +37,7 @@ export default function OrderDetailPage() {
           <div key={item.id} className="flex items-center gap-4 rounded-xl border border-leaf-800/10 p-3">
             <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-leaf-50">
               {item.product.images[0] && (
-                <Image src={item.product.images[0].url} alt={item.product.name} fill className="object-cover" />
+                <ProductPhoto src={item.product.images[0].url} alt={item.product.name} sizes="56px" />
               )}
             </div>
             <div className="flex-1 text-sm">

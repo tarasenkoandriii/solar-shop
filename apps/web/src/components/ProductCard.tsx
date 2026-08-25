@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import Image from 'next/image';
+import { ProductPhoto } from './ProductPhoto';
 import type { Locale } from '../lib/i18n';
 import type { Dictionary } from '../lib/get-dictionary';
 import type { Product } from '../lib/api';
@@ -24,13 +24,15 @@ export function ProductCard({
       className="group flex flex-col overflow-hidden rounded-2xl border border-leaf-800/10 bg-white transition hover:shadow-lg"
     >
       <div className="relative aspect-[4/3] bg-leaf-50">
+        {/* ProductPhoto сам вирішує, чи можна прогнати цей URL через
+            next/image: фото, вже перенесене на Vercel Blob, оптимізується,
+            ще не перенесене — показується напряму. Див. ProductPhoto.tsx. */}
         {cover && (
-          <Image
+          <ProductPhoto
             src={cover}
             alt={product.images[0]?.altText ?? product.name}
-            fill
-            className="object-cover transition group-hover:scale-105"
             sizes="(max-width: 768px) 100vw, 25vw"
+            className="transition group-hover:scale-105"
           />
         )}
         <div className="absolute left-2 top-2 flex flex-col gap-1">

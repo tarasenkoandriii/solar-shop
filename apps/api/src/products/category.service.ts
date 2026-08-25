@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { titleSimilarity } from '@solar-shop/db';
 import { PrismaService } from '../prisma/prisma.service';
+import { categoryCacheKey, type ParserRunCache } from '../parser/parser-run-cache';
 
 // За прямим запитом користувача — "сохранять сырые категории с сайтов и
 // матчить с существующими на сайте, если явного соответствия нет
@@ -55,9 +56,43 @@ export class CategoryService {
   //    взагалі щось інше. Шукаємо/створюємо PENDING Category зі слагом
   //    від siteCategoryLabel і повертаємо ЙОГО ключ замість
   //    internalKey — товар піде в чергу "чекає модерації категорії".
-  async resolveCategoryKey(internalKey: string, siteCategoryLabel: string | undefined | null): Promise<string> {
+  //
+  // `cache` (опційно) — per-run кеш парсера. siteCategoryLabel однаковий
+  // для ВСІЄЇ сторінки категорії (див. коментар у adapter.interface.ts),
+  // тобто для десятків позицій поспіль ця функція раніше робила 1-3
+  // ІДЕНТИЧНІ запити до БД і повертала однакову відповідь. З кешем — один
+  // раз на пару (internalKey, siteCategoryLabel) за прогін. Без cache
+  // поведінка не змінюється (адмінка, разові виклики).
+  async resolveCategoryKey(
+    internalKey: string,
+    siteCategoryLabel: string | undefined | null,
+    cache?: ParserRunCache,
+  ): Promise<string> {
     if (!siteCategoryLabel) return internalKey;
 
+    if (!cache) return this.resolveCategoryKeyUncached(internalKey, siteCategoryLabel);
+
+    const cacheKey = categoryCacheKey(internalKey, siteCategoryLabel);
+    const inFlight = cache.categoryKeyByLabel.get(cacheKey);
+    if (inFlight !== undefined) return inFlight;
+
+    // Кладемо ПРОМІС у кеш синхронно, до першого await — інакше кілька
+    // паралельних листингів з тієї самої сторінки категорії стартували б
+    // резолв одночасно і всі спробували б створити один і той самий
+    // PENDING-запис (Category.key унікальний → P2002 у всіх, крім одного).
+    const pending = this.resolveCategoryKeyUncached(internalKey, siteCategoryLabel);
+    cache.categoryKeyByLabel.set(cacheKey, pending);
+    try {
+      return await pending;
+    } catch (err) {
+      // Невдалий резолв не має отруювати кеш на весь прогін — наступна
+      // позиція спробує ще раз.
+      cache.categoryKeyByLabel.delete(cacheKey);
+      throw err;
+    }
+  }
+
+  private async resolveCategoryKeyUncached(internalKey: string, siteCategoryLabel: string): Promise<string> {
     const expected = await this.prisma.client.category.findUnique({ where: { key: internalKey } });
     if (expected) {
       const bestScore = Math.max(
@@ -87,17 +122,33 @@ export class CategoryService {
     if (existingPending) return existingPending.key;
 
     console.log(`[CategoryService] Нова, невпізнана категорія "${siteCategoryLabel}" (очікувалась "${internalKey}") — створюю запис на модерацію (key: ${slug}).`);
-    const created = await this.prisma.client.category.create({
-      data: {
-        key: slug,
-        nameUk: siteCategoryLabel,
-        nameRu: siteCategoryLabel,
-        nameEn: siteCategoryLabel,
-        articleNumberPrefix: slug.slice(0, 4).toUpperCase(),
-        status: 'PENDING',
-      },
-    });
-    return created.key;
+    try {
+      const created = await this.prisma.client.category.create({
+        data: {
+          key: slug,
+          nameUk: siteCategoryLabel,
+          nameRu: siteCategoryLabel,
+          nameEn: siteCategoryLabel,
+          articleNumberPrefix: slug.slice(0, 4).toUpperCase(),
+          status: 'PENDING',
+        },
+      });
+      return created.key;
+    } catch (err) {
+      // ЛИШЕ конфлікт унікальності. Ковтати тут будь-яку помилку не можна:
+      // на транзієнтному збої пулера ми повернули б ключ категорії, рядка
+      // якої не існує, — а Product.category це просто String без
+      // зовнішнього ключа, тож товар спокійно створився б із посиланням у
+      // нікуди і не з'явився б у черзі модерації категорій узагалі.
+      if (!isUniqueViolation(err)) throw err;
+
+      // Хтось створив цей самий slug між нашим findUnique і create —
+      // інший інстанс функції на Vercel, або адмін вручну. Переконуємось,
+      // що рядок справді там, і лише тоді віддаємо його ключ.
+      const raced = await this.prisma.client.category.findUnique({ where: { key: slug } });
+      if (raced) return raced.key;
+      throw err;
+    }
   }
 
   private async getOr404(id: string) {
@@ -141,6 +192,12 @@ export class CategoryService {
     await this.getOr404(id);
     return this.prisma.client.category.update({ where: { id }, data: { status: 'REJECTED' } });
   }
+}
+
+// Prisma-клієнт тут не імпортується як значення, тому перевіряємо код
+// помилки структурно — це той самий P2002, що й у Prisma.
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2002';
 }
 
 function slugifyLabel(label: string): string {

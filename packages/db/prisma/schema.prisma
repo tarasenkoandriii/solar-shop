@@ -342,13 +342,32 @@ model ProductImage {
   id              String   @id @default(cuid())
   productId       String
   product         Product  @relation(fields: [productId], references: [id])
+  // Актуальне посилання на картинку. Спочатку — пряме посилання на сайт
+  // постачальника (щоб фото було видно ОДРАЗУ після парсингу), після
+  // успішного дзеркалювання — посилання на Vercel Blob.
   url             String
+  // Оригінальний URL на сайті постачальника — зберігається ЗАВЖДИ, навіть
+  // після переїзду на Blob. Той самий принцип, що вже застосований для
+  // Article.sourceImageUrl: без нього невдале завантаження неможливо було б
+  // повторити, і картинка лишалась би на хотлінку назавжди. Плюс це ключ
+  // дедуплікації — один і той самий файл у різних товарів вантажиться раз.
+  sourceUrl       String?
+  // Проставляється, коли url реально вказує на Blob. null = ще на хотлінку.
+  mirroredAt      DateTime?
+  // Лічильник невдалих спроб. Картинка, якої вже немає в постачальника,
+  // інакше довбалася б щопрогону вічно; після ліміту просто лишається на
+  // прямому посиланні й більше не береться в роботу.
+  mirrorAttempts  Int      @default(0)
   altText         String?
   sortOrder       Int      @default(0)
   sourceListingId String?
   createdAt       DateTime @default(now())
 
   @@index([productId])
+  // Черга дзеркалювання: беремо рядки з mirroredAt = null.
+  @@index([mirroredAt])
+  // Пошук уже завантаженого дубліката за оригінальним URL.
+  @@index([sourceUrl])
 }
 
 model Tag {

@@ -1,9 +1,9 @@
-import Image from 'next/image';
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
 import { isLocale, type Locale } from '../../../../lib/i18n';
 import { getDictionary } from '../../../../lib/get-dictionary';
 import { apiGet } from '../../../../lib/api';
+import { ProductPhoto } from '../../../../components/ProductPhoto';
 import type { ExchangeRate, ProductDetail } from '../../../../lib/api';
 import { PriceTag } from '../../../../components/PriceTag';
 import { ProductPurchaseActions } from '../../../../components/ProductPurchaseActions';
@@ -82,15 +82,16 @@ export default async function ProductPage({ params }: { params: { locale: string
       <div className="grid gap-10 md:grid-cols-2">
         <div>
           <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-leaf-50">
+            {/* priority — головне фото товару в першому екрані. */}
             {product.images[0] && (
-              <Image src={product.images[0].url} alt={product.name} fill className="object-cover" />
+              <ProductPhoto src={product.images[0].url} alt={product.name} sizes="(max-width: 768px) 100vw, 50vw" priority />
             )}
           </div>
           {product.images.length > 1 && (
             <div className="mt-3 grid grid-cols-4 gap-2">
               {product.images.slice(1).map((img) => (
                 <div key={img.id} className="relative aspect-square overflow-hidden rounded-lg bg-leaf-50">
-                  <Image src={img.url} alt={img.altText ?? product.name} fill className="object-cover" />
+                  <ProductPhoto src={img.url} alt={img.altText ?? product.name} sizes="120px" />
                 </div>
               ))}
             </div>

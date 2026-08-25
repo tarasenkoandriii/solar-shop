@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import Image from 'next/image';
+import { ProductPhoto } from './ProductPhoto';
 import { apiMutate } from '../lib/api';
 import type { Product } from '../lib/api';
 import { useTelegramSession } from './TelegramProvider';
@@ -57,7 +57,7 @@ export function ProductSheet({ product, onClose }: { product: Product; onClose: 
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-leaf-900/10" />
         <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-leaf-50">
           {product.images[0] && (
-            <Image src={product.images[0].url} alt={product.name} fill className="object-cover" />
+            <ProductPhoto src={product.images[0].url} alt={product.name} sizes="100vw" priority />
           )}
         </div>
         <p className="mt-3 text-xs text-leaf-900/50">
