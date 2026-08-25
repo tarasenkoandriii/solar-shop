@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../lib/api';
 import type { Article } from '../../lib/api';
 import { useAdminLocale } from '../../lib/locale-context';
@@ -74,6 +74,56 @@ export default function ArticlesPage() {
       alert(err instanceof Error ? err.message : d.genericError);
     } finally {
       setBackfilling(false);
+    }
+  }
+
+  // За прямим запитом користувача — "добавить полный импорт-экспорт
+  // всех статей в заголовке через compacted json". Той самий підхід,
+  // що вже FinancingProgramsPage — експорт у файл, ідемпотентний
+  // імпорт з детальним результатом.
+  const [exporting, setExporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ created: number; updated: number; translationsCreated: number; translationsUpdated: number; errors: string[] } | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const data = await apiFetch('/admin/articles/export');
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `articles-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : d.exportError);
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const result = await apiFetch<{ created: number; updated: number; translationsCreated: number; translationsUpdated: number; errors: string[] }>(
+        '/admin/articles/import',
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+      setImportResult(result);
+      await load();
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : d.importError);
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
 
@@ -180,12 +230,31 @@ export default function ArticlesPage() {
           >
             {backfilling ? d.fetchingPhotos : d.backfillPhotos}
           </button>
+          <button
+            disabled={exporting}
+            onClick={handleExport}
+            className="rounded-full border border-leaf-800 px-4 py-2 text-sm font-medium text-leaf-800 disabled:opacity-60 dark:border-white dark:text-white"
+          >
+            {exporting ? '...' : d.exportJson}
+          </button>
+          <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} className="max-w-[10rem] text-xs" />
         </div>
       </div>
       <p className="mb-2 text-sm text-leaf-900/50 dark:text-white/50">{d.intro}</p>
       <p className="mb-4 text-xs text-leaf-900/40 dark:text-white/40">
         {d.stepsNote} (<code>article_batch_poll</code>)
       </p>
+
+      {importResult && (
+        <div className="mb-4 rounded-lg bg-leaf-50 p-3 text-sm dark:bg-white/5 dark:text-white">
+          {d.importedLabel} {importResult.created}, {d.translationsCreatedLabel} {importResult.translationsCreated}, {d.translationsUpdatedLabel}{' '}
+          {importResult.translationsUpdated}
+          {importResult.errors.length > 0 && `, ${d.withErrorLabel} ${importResult.errors.length}`}
+        </div>
+      )}
+      {importError && (
+        <div className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">{importError}</div>
+      )}
 
       {backfillResult && (
         <div className="mb-4 rounded-lg bg-leaf-50 p-3 text-sm dark:bg-white/5 dark:text-white">

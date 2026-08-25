@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { GrokService } from '../grok/grok.service';
@@ -577,6 +577,132 @@ export class ArticlesService {
 
     return { processed, stillPending, translatedTotal, failedTotal };
   }
+
+  // За прямим запитом користувача — "добавить полный импорт-экспорт
+  // всех статей в заголовке через compacted json". Той самий принцип
+  // ідемпотентності, що вже FinancingService.exportData()/importData()
+  // (natural key, не id) — тут природний ключ статті: `slug`. АЛЕ,
+  // на відміну від programs (де свідомо обрано читабельний об'єктний
+  // формат, бо десятки записів), тут користувач ЯВНО попросив саме
+  // "compacted" — виправдано: кожна стаття має ДО 3 перекладів з
+  // ДОВГИМ текстовим контентом (content — повний текст статті), тому
+  // translations серіалізовано TUPLE-масивами (без повторюваних
+  // ключів locale/slug/title/excerpt/content/status на кожен переклад),
+  // не масивом об'єктів — реальна економія байтів при сотнях статей.
+  async exportData(): Promise<{ formatVersion: 1; exportedAt: string; articles: ExportedArticle[] }> {
+    const rows = await this.prisma.client.article.findMany({
+      orderBy: { createdAt: 'asc' },
+      include: { translations: true },
+    });
+    return {
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      articles: rows.map((a) => ({
+        slug: a.slug,
+        sourceUrl: a.sourceUrl,
+        sourceSite: a.sourceSite,
+        originalLocale: a.originalLocale,
+        coverImage: a.coverImage,
+        sourceImageUrl: a.sourceImageUrl,
+        score: a.score,
+        scoreReasoning: a.scoreReasoning,
+        tags: a.tags,
+        publishedAt: a.publishedAt ? a.publishedAt.toISOString() : null,
+        status: a.status,
+        translations: a.translations.map((t) => [t.locale, t.slug, t.title, t.excerpt, t.content, t.status] as ExportedTranslationTuple),
+      })),
+    };
+  }
+
+  async importData(payload: unknown): Promise<{ created: number; updated: number; translationsCreated: number; translationsUpdated: number; errors: string[] }> {
+    const data = this.validateArticleImportPayload(payload);
+    const result = { created: 0, updated: 0, translationsCreated: 0, translationsUpdated: 0, errors: [] as string[] };
+
+    for (const a of data.articles) {
+      try {
+        const existing = await this.prisma.client.article.findUnique({ where: { slug: a.slug } });
+        const fields = {
+          sourceUrl: a.sourceUrl ?? undefined,
+          sourceSite: a.sourceSite ?? undefined,
+          originalLocale: a.originalLocale ?? 'uk',
+          coverImage: a.coverImage ?? undefined,
+          sourceImageUrl: a.sourceImageUrl ?? undefined,
+          score: a.score ?? undefined,
+          scoreReasoning: a.scoreReasoning ?? undefined,
+          tags: a.tags ?? [],
+          publishedAt: a.publishedAt ? new Date(a.publishedAt) : undefined,
+          status: a.status as never,
+        };
+        const article = existing
+          ? await this.prisma.client.article.update({ where: { id: existing.id }, data: fields })
+          : await this.prisma.client.article.create({ data: { ...fields, slug: a.slug } });
+        if (existing) result.updated++;
+        else result.created++;
+
+        for (const [locale, tSlug, title, excerpt, content, status] of a.translations) {
+          const existingTranslation = await this.prisma.client.articleTranslation.findUnique({
+            where: { articleId_locale: { articleId: article.id, locale } },
+          });
+          const tFields = { slug: tSlug, title, excerpt, content, status: status as never };
+          if (existingTranslation) {
+            await this.prisma.client.articleTranslation.update({ where: { id: existingTranslation.id }, data: tFields });
+            result.translationsUpdated++;
+          } else {
+            await this.prisma.client.articleTranslation.create({ data: { ...tFields, articleId: article.id, locale } });
+            result.translationsCreated++;
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result.errors.push(`${a.slug}: ${message}`);
+      }
+    }
+
+    return result;
+  }
+
+  // Валідація структурою (не class-validator DTO — той самий підхід,
+  // що вже FinancingService.validateImportPayload() — `unknown`
+  // коректно проходить через global ValidationPipe, не обходить
+  // його мовчки).
+  private validateArticleImportPayload(payload: unknown): { articles: ExportedArticle[] } {
+    if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { articles?: unknown }).articles)) {
+      throw new BadRequestException('Невалідний формат: очікується { articles: [...] }');
+    }
+    const articles = (payload as { articles: unknown[] }).articles;
+    for (const a of articles) {
+      if (!a || typeof a !== 'object' || typeof (a as { slug?: unknown }).slug !== 'string') {
+        throw new BadRequestException('Кожна стаття має містити slug рядком');
+      }
+      const translations = (a as { translations?: unknown }).translations;
+      if (!Array.isArray(translations)) {
+        throw new BadRequestException(`Стаття "${(a as { slug: string }).slug}" має містити translations масивом`);
+      }
+      for (const t of translations) {
+        if (!Array.isArray(t) || t.length !== 6) {
+          throw new BadRequestException(`Стаття "${(a as { slug: string }).slug}": кожен переклад має бути tuple з 6 елементів [locale, slug, title, excerpt, content, status]`);
+        }
+      }
+    }
+    return { articles: articles as ExportedArticle[] };
+  }
+}
+
+type ExportedTranslationTuple = [locale: string, slug: string, title: string, excerpt: string, content: string, status: string];
+
+interface ExportedArticle {
+  slug: string;
+  sourceUrl: string | null;
+  sourceSite: string | null;
+  originalLocale: string;
+  coverImage: string | null;
+  sourceImageUrl: string | null;
+  score: number | null;
+  scoreReasoning: string | null;
+  tags: string[];
+  publishedAt: string | null;
+  status: string;
+  translations: ExportedTranslationTuple[];
 }
 
 function slugify(text: string): string {

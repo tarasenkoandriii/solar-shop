@@ -63,4 +63,20 @@ export class ArticlesController {
   backfillCoverImages() {
     return this.service.backfillMissingCoverImages();
   }
+
+  // За прямим запитом користувача — "добавить полный импорт-экспорт
+  // всех статей в заголовке через compacted json".
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Get('admin/articles/export')
+  exportData() {
+    return this.service.exportData();
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @Post('admin/articles/import')
+  importData(@Body() payload: unknown) {
+    return this.service.importData(payload);
+  }
 }

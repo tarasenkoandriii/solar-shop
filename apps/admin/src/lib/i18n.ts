@@ -37,6 +37,11 @@ export interface AdminDictionary {
     devLoginErrorConsoleHint: string;
   };
   theme: { switchToDark: string; switchToLight: string };
+  // За прямим запитом користувача — "добавить простую кнопку logout
+  // в шапку админки (просто чистит cookie session и обновляет
+  // страницу)". Бекенд-ендпоінт POST /auth/logout вже реально існував
+  // (res.clearCookie('session')) — не було лише кнопки в UI.
+  logout: string;
   common: {
     loading: string;
     save: string;
@@ -703,6 +708,13 @@ export interface AdminDictionary {
       publishAll: string;
       unarchive: string;
       archive: string;
+      exportJson: string;
+      exportError: string;
+      importedLabel: string;
+      translationsCreatedLabel: string;
+      translationsUpdatedLabel: string;
+      withErrorLabel: string;
+      importError: string;
       genericError: string;
       confirmDelete: string;
       deleteError: string;
