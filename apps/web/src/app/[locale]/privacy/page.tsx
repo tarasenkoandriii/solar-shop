@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { isLocale, type Locale } from '../../../lib/i18n';
+import { COMPANY } from '../../../lib/company';
 
 // За прямим запитом користувача ("составь по образцу предыдущих
 // проектов") — структура (розділи, порядок, рівень деталізації)
@@ -12,20 +13,22 @@ import { isLocale, type Locale } from '../../../lib/i18n';
 // prisma/schema.prisma — User/Order/Lead/FinancingProgramReview) під
 // час написання, не вигадано на око.
 //
-// Реквізити ФОП — той самий патерн плейсхолдерів, що вже в
-// payment/page.tsx ('[ЄДРПОУ/ІПН]' тощо) — НЕ вигадані номери/адреси,
-// свідомо залишені явними плейсхолдерами для заповнення юристом/
-// власником перед запуском.
+// За запитом користувача (27.08.2026) — реальні реквізити замість
+// плейсхолдерів. Джерело одне: lib/company.ts.
+//
+// Змінилася й організаційна форма: було "ФОП Тарасенко Андрій
+// Євгенійович", стало ТОВ. У політиці конфіденційності це не косметика —
+// саме ця особа виступає володільцем персональних даних.
 const ENTITY_PLACEHOLDER = {
-  uk: 'ФОП Тарасенко Андрій Євгенійович (код ЄДРПОУ/ІПН: [заповнити])',
-  ru: 'ФЛП Тарасенко Андрей Евгеньевич (код ЕГРПОУ/ИНН: [заповнити])',
-  en: 'Sole proprietor Andrii Tarasenko (EDRPOU/tax ID: [заповнити])',
+  uk: `${COMPANY.legalName} (код ЄДРПОУ: ${COMPANY.edrpou}, адреса: ${COMPANY.address})`,
+  ru: `ООО «ХЕЙСЛОР ФАСТ» (код ЕГРПОУ: ${COMPANY.edrpou}, адрес: ${COMPANY.address})`,
+  en: `HEYSLOR FAST LLC (EDRPOU: ${COMPANY.edrpou}, address: ${COMPANY.address})`,
 };
 
 const CONTACT_PLACEHOLDER = {
-  uk: '[телефон], [email] — заповнити перед запуском (актуальні контакти офісів — на сторінці «Контакти»)',
-  ru: '[телефон], [email] — заповнити перед запуском (актуальные контакты офисов — на странице «Контакты»)',
-  en: '[phone], [email] — to be filled in before launch (see current office contacts on the Contacts page)',
+  uk: `${COMPANY.phone}, ${COMPANY.email}`,
+  ru: `${COMPANY.phone}, ${COMPANY.email}`,
+  en: `${COMPANY.phone}, ${COMPANY.email}`,
 };
 
 const CONTENT: Record<Locale, { title: string; sections: { h: string; p: string }[] }> = {

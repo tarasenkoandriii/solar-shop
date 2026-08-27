@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { isLocale, type Locale } from '../../../lib/i18n';
+import { COMPANY } from '../../../lib/company';
 
 // За прямим запитом користувача ("составь по образцу предыдущих
 // проектов") — структура портована з РЕАЛЬНОГО коду попереднього
@@ -17,16 +18,22 @@ import { isLocale, type Locale } from '../../../lib/i18n';
 // компонентами потенційно підпадають під Постанову КМУ №172 про
 // технічно складні побутові товари, це вимагає юридичної перевірки
 // конкретних моделей, не мій здогад.
+// За запитом користувача (27.08.2026) — реальні реквізити замість
+// плейсхолдерів, джерело одне: lib/company.ts.
+//
+// Форма змінилася з ФОП на ТОВ. Для публічної оферти це принципово: саме
+// ця юридична особа є стороною договору, який покупець приймає натисканням
+// кнопки. Договір із неіснуючим ФОП не був би договором.
 const ENTITY_PLACEHOLDER = {
-  uk: 'ФОП Тарасенко Андрій Євгенійович (код ЄДРПОУ/ІПН: [заповнити], юридична адреса: [заповнити])',
-  ru: 'ФЛП Тарасенко Андрей Евгеньевич (код ЕГРПОУ/ИНН: [заповнити], юридический адрес: [заповнити])',
-  en: 'Sole proprietor Andrii Tarasenko (EDRPOU/tax ID: [заповнити], registered address: [заповнити])',
+  uk: `${COMPANY.legalName} (код ЄДРПОУ: ${COMPANY.edrpou}, юридична адреса: ${COMPANY.address})`,
+  ru: `ООО «ХЕЙСЛОР ФАСТ» (код ЕГРПОУ: ${COMPANY.edrpou}, юридический адрес: ${COMPANY.address})`,
+  en: `HEYSLOR FAST LLC (EDRPOU: ${COMPANY.edrpou}, registered address: ${COMPANY.address})`,
 };
 
 const CONTACT_PLACEHOLDER = {
-  uk: '[телефон], [email] — заповнити перед запуском (актуальні контакти офісів — на сторінці «Контакти»)',
-  ru: '[телефон], [email] — заповнити перед запуском (актуальные контакты офисов — на странице «Контакты»)',
-  en: '[phone], [email] — to be filled in before launch (see current office contacts on the Contacts page)',
+  uk: `${COMPANY.phone}, ${COMPANY.email}`,
+  ru: `${COMPANY.phone}, ${COMPANY.email}`,
+  en: `${COMPANY.phone}, ${COMPANY.email}`,
 };
 
 const CONTENT: Record<Locale, { title: string; sections: { h: string; p: string }[] }> = {

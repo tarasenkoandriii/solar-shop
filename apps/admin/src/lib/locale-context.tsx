@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from 'react';
 import type { AdminDictionary } from './i18n';
-import type { AdminLocale } from './i18n';
+import { ADMIN_LOCALES, type AdminLocale } from './i18n';
 import { uk } from './dictionaries/uk';
 import { ru } from './dictionaries/ru';
 import { en } from './dictionaries/en';
@@ -34,8 +34,13 @@ export function AdminLocaleProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === 'uk' || stored === 'ru' || stored === 'en') {
-      setLocaleState(stored);
+    // Звіряємося саме з ADMIN_LOCALES, а не з переліком літералів: після
+    // прибирання російської (27.08.2026) у частини співробітників у
+    // localStorage лишилося збережене 'ru', і жорсткий список повертав би
+    // їх у прибрану мову при кожному вході. Тепер таке значення просто
+    // ігнорується — лишається дефолтна 'uk'.
+    if (stored && (ADMIN_LOCALES as string[]).includes(stored)) {
+      setLocaleState(stored as AdminLocale);
     }
   }, []);
 

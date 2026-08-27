@@ -5,6 +5,7 @@ import fontkit from '@pdf-lib/fontkit';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import { companyInvoiceLines } from '../common/company';
 
 // За прямим запитом користувача — "PDF без пагинации — кошторис
 // проєкту и бізнес-план обрезают текст, если не влезает на одну A4
@@ -140,9 +141,12 @@ export class InvoiceService {
     w.draw(`№ ${order.id.slice(-8).toUpperCase()} від ${order.createdAt.toLocaleDateString('uk-UA')}`, 11);
     w.moveDown(10);
 
-    w.draw('Постачальник: ФОП [ПІБ] (заповнити перед запуском)', 10);
-    w.draw('ЄДРПОУ/ІПН: [ЄДРПОУ/ІПН]', 10);
-    w.draw('IBAN: [IBAN], Банк: [Назва банку]', 10);
+    // Реквізити (27.08.2026) — раніше тут були три рядки-заглушки
+    // ("ФОП [ПІБ] (заповнити перед запуском)", "IBAN: [IBAN]"), і саме
+    // такий документ їхав покупцю. Джерело одне: common/company.ts.
+    for (const line of companyInvoiceLines()) {
+      w.draw(line, 10);
+    }
     w.moveDown(10);
 
     w.draw(`Отримувач: ${order.contactName}, ${order.contactPhone}`, 10);

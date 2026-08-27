@@ -1,16 +1,28 @@
+import { Fragment } from 'react';
 import { notFound } from 'next/navigation';
 import { isLocale, type Locale } from '../../../lib/i18n';
 import { getDictionary } from '../../../lib/get-dictionary';
 
-// Реквизиты — плейсхолдеры (ТЗ п.3.5), заполняются реальными данными перед
-// запуском (ФОП Тарасенко Андрій Євгенійович).
-const PAYMENT_DETAILS = {
-  entityName: 'ФОП [ПІБ] (заповнити перед запуском)',
-  edrpou: '[ЄДРПОУ/ІПН]',
-  iban: '[IBAN]',
-  bank: '[Назва банку]',
-  purpose: 'Оплата за товар згідно рахунку №___',
-};
+import { COMPANY } from '../../../lib/company';
+
+// Реквізити більше не плейсхолдери — див. lib/company.ts.
+const PAYMENT_PURPOSE = 'Оплата за товар згідно рахунку №___';
+
+// Рядки таблиці збираються так, щоб порожні реквізити просто не
+// потрапляли у видачу. Раніше сторінка показувала покупцю "[IBAN]" і
+// "[Назва банку]" — це гірше за відсутність рядка: виглядає як зламана
+// сторінка й підриває довіру рівно в той момент, коли людина зібралася
+// платити.
+const DETAILS: { label: string; value: string }[] = [
+  { label: 'Отримувач', value: COMPANY.legalName },
+  { label: 'ЄДРПОУ', value: COMPANY.edrpou },
+  { label: 'Юридична адреса', value: COMPANY.address },
+  { label: 'IBAN', value: COMPANY.iban },
+  { label: 'Банк', value: COMPANY.bank },
+  { label: 'Телефон', value: COMPANY.phone },
+  { label: 'E-mail', value: COMPANY.email },
+  { label: 'Призначення платежу', value: PAYMENT_PURPOSE },
+].filter((row) => row.value.length > 0);
 
 export default function PaymentPage({ params }: { params: { locale: string } }) {
   if (!isLocale(params.locale)) notFound();
@@ -43,16 +55,12 @@ export default function PaymentPage({ params }: { params: { locale: string } }) 
 
       <h2 className="mb-3 font-semibold text-leaf-900">{dict.payment.detailsTitle}</h2>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-2xl border border-leaf-800/10 p-5 text-sm">
-        <dt className="text-leaf-900/50">Отримувач</dt>
-        <dd className="font-medium text-leaf-900">{PAYMENT_DETAILS.entityName}</dd>
-        <dt className="text-leaf-900/50">ЄДРПОУ/ІПН</dt>
-        <dd className="font-medium text-leaf-900">{PAYMENT_DETAILS.edrpou}</dd>
-        <dt className="text-leaf-900/50">IBAN</dt>
-        <dd className="font-medium text-leaf-900">{PAYMENT_DETAILS.iban}</dd>
-        <dt className="text-leaf-900/50">Банк</dt>
-        <dd className="font-medium text-leaf-900">{PAYMENT_DETAILS.bank}</dd>
-        <dt className="text-leaf-900/50">Призначення платежу</dt>
-        <dd className="font-medium text-leaf-900">{PAYMENT_DETAILS.purpose}</dd>
+        {DETAILS.map((row) => (
+          <Fragment key={row.label}>
+            <dt className="text-leaf-900/50">{row.label}</dt>
+            <dd className="font-medium text-leaf-900">{row.value}</dd>
+          </Fragment>
+        ))}
       </dl>
     </div>
   );

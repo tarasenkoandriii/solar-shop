@@ -1,13 +1,16 @@
 import type { ReactNode } from 'react';
 import { notFound } from 'next/navigation';
-import { isLocale, type Locale } from '../../lib/i18n';
+import { isLocale, locales, type Locale } from '../../lib/i18n';
 import { CartProvider } from '../../lib/cart-context';
 import { ThemeProvider } from '../../lib/theme-context';
 import { Header } from '../../components/Header';
 import { Footer } from '../../components/Footer';
 
+// Список мов тут раніше був продубльований літералами — і при прибиранні
+// російської (27.08.2026) це стало б четвертим місцем, яке треба не
+// забути. Тепер джерело одне: lib/i18n.ts.
 export function generateStaticParams() {
-  return [{ locale: 'uk' }, { locale: 'ru' }, { locale: 'en' }];
+  return locales.map((locale) => ({ locale }));
 }
 
 export default function LocaleLayout({
