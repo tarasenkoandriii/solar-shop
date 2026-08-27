@@ -76,12 +76,21 @@ export interface Product {
   cachedIsNew: boolean;
 }
 
+// Аудит 27.08.2026: тут було оголошено `sourceListing.priceUsd` і повний
+// `vendor`. Бекенд справді їх віддавав — тобто закупівельна ціна кожного
+// постачальника й уся його картка (телефон, контактна особа, статус
+// договору) лежали у відповіді публічної картки товару. Жоден компонент
+// їх не читав: `listings` у apps/web не використовується ніде, це був
+// чистий витік. Тип приведено до того, що бекенд віддає ТЕПЕР, — щоб
+// наступний, хто сюди зазирне, не відновив поле "бо в типі ж є".
 export interface ProductListing {
   id: string;
   sourceListing: {
-    priceUsd: string;
+    id: string;
     inStock: boolean;
-    vendor: { warehouseCities: string[] };
+    isPromo: boolean;
+    discountPercent: number | null;
+    vendor: { id: string; name: string; warehouseCities: string[]; countryCode: string };
   };
 }
 

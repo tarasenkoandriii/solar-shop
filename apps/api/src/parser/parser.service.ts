@@ -5,6 +5,7 @@ import { MatchingService } from './matching.service';
 import { ProductPricingService } from '../products/product-pricing.service';
 import type { RawListing } from './adapter.interface';
 import { createParserRunCache, mapWithConcurrency, type CachedExchangeRate, type ParserRunCache } from './parser-run-cache';
+import { roundToCents } from '../common/money';
 
 export interface ParserRunResult {
   vendorName: string;
@@ -702,11 +703,6 @@ function dedupeBySourceUrl(rawListings: RawListing[]): RawListing[] {
     if (!byUrl.has(raw.sourceUrl)) byUrl.set(raw.sourceUrl, raw);
   }
   return [...byUrl.values()];
-}
-
-// Та сама точність, що й у колонки SourceListing.priceUsd — Decimal(10,2).
-function roundToCents(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 interface ExistingListing {

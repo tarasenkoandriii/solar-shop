@@ -30,17 +30,34 @@ export class NovaPoshtaService {
     return this.config.get<string>(key) ?? fallback;
   }
 
+  // АУДИТ 27.08.2026 — параметр `retries` тут зʼявився не просто так.
+  //
+  // Було: `retries: 2` для ВСІХ викликів без розбору. Але API Нової Пошти —
+  // це один URL і один POST на будь-яку дію, тож той самий ретрай діяв і на
+  // читання довідників (безпечно), і на InternetDocument/save — створення
+  // накладної. fetchWithRetry повторює запит і при таймауті (10 с), і при
+  // 5xx; НП під навантаженням відповідає довше 10 с, УЖЕ створивши
+  // документ. Ми цієї відповіді не дочікувалися й слали запит ще раз — до
+  // трьох фізичних наклейок на одне замовлення, три оплати доставки і
+  // ручне скасування зайвих.
+  //
+  // Ідемпотентного ключа НП не підтримує, тому єдиний правильний варіант —
+  // не повторювати те, що змінює стан. Виклики, які створюють або
+  // видаляють документи, тепер передають retries: 0 явно.
   private async npRequest(
     modelName: string,
     calledMethod: string,
     methodProperties: Record<string, unknown>,
+    retries = 2,
+    timeoutMs = 10_000,
   ): Promise<{ data: unknown[] }> {
     const apiKey = this.env('NOVA_POSHTA_API_KEY');
     if (!apiKey) throw new Error('NOVA_POSHTA_API_KEY not set');
 
     const res = await fetchWithRetry(this.apiUrl, {
       method: 'POST',
-      retries: 2,
+      retries,
+      timeoutMs,
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
       body: JSON.stringify({ apiKey, modelName, calledMethod, methodProperties }),
     });
@@ -173,7 +190,14 @@ export class NovaPoshtaService {
         props.RecipientAddressName = input.branchName.replace(/\D/g, '') || input.branchName;
       }
 
-      const { data } = await this.npRequest('InternetDocument', 'save', props);
+      // retries: 0 — створення накладної неідемпотентне, повтор друкує
+      // зайву наклейку. Див. коментар до npRequest().
+      //
+      // timeoutMs піднято до 30 с саме тому, що ретраїв більше немає:
+      // з дефолтними 10 с повільна, але УСПІШНА відповідь НП тепер
+      // поверталася б як { status: 'failed' }, менеджер створював би ТТН
+      // руками — і дублікат просто переїхав би з автоматичного в ручний.
+      const { data } = await this.npRequest('InternetDocument', 'save', props, 0, 30_000);
       const first = (data[0] ?? {}) as { IntDocNumber?: string; Number?: string; Ref?: string };
       const ttn = first.IntDocNumber || first.Number;
       if (!ttn) return { status: 'failed', error: 'No TTN returned' };
@@ -184,13 +208,48 @@ export class NovaPoshtaService {
     }
   }
 
-  async getPrintLabelUrl(ttnRefs: string[]): Promise<string> {
+  // АУДИТ 27.08.2026. Було: публічний getPrintLabelUrl(), який вклеював
+  // NOVA_POSHTA_API_KEY прямо в URL, — і цей URL повертався в браузер
+  // адміна як тіло відповіді ТА записувався в Order.ttnLabelUrl. Тобто
+  // ключ, яким створюються й видаляються накладні, осідав в історії
+  // браузера, у devtools і назавжди в базі. (Окремо: кнопка "Друк
+  // накладної" в адмінці цей URL просто відкидала — фіча й не працювала.)
+  //
+  // Тепер ключ не залишає сервера: ми самі забираємо PDF і віддаємо байти.
+  private buildPrintLabelUrl(ttnRefs: string[]): string {
     const apiKey = this.env('NOVA_POSHTA_API_KEY');
     const refsParam = ttnRefs.join(',');
     return `https://my.novaposhta.ua/orders/printMarking60x100/orders[]/${refsParam}/type/pdf/apiKey/${apiKey}`;
   }
 
+  async fetchPrintLabelPdf(ttnRefs: string[]): Promise<Buffer> {
+    if (ttnRefs.length === 0) throw new Error('Не передано жодного ТТН для друку');
+    // retries: 2 тут доречні — це GET, читання, повтор нічого не створює.
+    const res = await fetchWithRetry(this.buildPrintLabelUrl(ttnRefs), { retries: 2, timeoutMs: 20_000 });
+    if (!res.ok) {
+      // Свідомо НЕ додаємо в текст помилки сам URL — у ньому ключ.
+      throw new Error(`Нова Пошта віддала HTTP ${res.status} на друк накладної`);
+    }
+
+    // my.novaposhta.ua — це кабінет, а не API: при неправильному або
+    // простроченому ключі він віддає HTML-сторінку логіна з кодом 200.
+    // Без цієї перевірки ми б загорнули HTML у Content-Type: application/pdf
+    // і адмін отримав би порожню вкладку без жодного натяку на причину.
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('pdf')) {
+      throw new Error(`Нова Пошта повернула не PDF (${contentType || 'без типу'}) — найімовірніше, NOVA_POSHTA_API_KEY недійсний або прострочений.`);
+    }
+
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   async deleteTtn(ttnRef: string): Promise<void> {
+    // На відміну від createTtn, ретраї тут ЗАЛИШАЮТЬСЯ. Спершу я їх теж
+    // прибрав "за симетрією" — і це було б погіршенням: видалення за
+    // конкретним DocumentRef ідемпотентне за своєю природою (повтор у
+    // найгіршому разі дасть "документа не існує" на вже видаленому), тож
+    // ретрай нічого не псує, а без нього будь-який мережевий збій
+    // перетворюється на 500 в адмінці без другої спроби.
     await this.npRequest('InternetDocument', 'delete', { DocumentRefs: ttnRef });
   }
 

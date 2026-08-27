@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { UserRole } from '@solar-shop/db';
 import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
@@ -44,11 +45,12 @@ export class OrdersController {
   @UseGuards(JwtAuthGuard)
   @Get('account/orders/:id')
   async myOrderDetail(@CurrentUser() user: { sub: string }, @Param('id') id: string) {
-    const order = await this.service.findById(id);
-    // Личный кабинет — только свои заказы, не проверка на уровне БД-запроса
-    // (findById переиспользуется и админкой), поэтому фильтр здесь.
-    if (order.userId !== user.sub) return { error: 'Not found' };
-    return order;
+    // Аудит 27.08.2026: раніше тут викликався findById() і повертався
+    // сирий об'єкт — із собівартістю позицій і повним Product усередині.
+    // Плюс на чуже замовлення віддавалося `{ error: 'Not found' }` з
+    // кодом 200, тобто фронтенд бачив "успіх" із тілом-помилкою. Обидві
+    // частини тепер у findByIdForCustomer(): чистка полів + справжній 404.
+    return this.service.findByIdForCustomer(id, user.sub);
   }
 
   // ---- Admin ----
@@ -88,11 +90,25 @@ export class OrdersController {
     return this.service.createTtnManually(id);
   }
 
+  // Аудит 27.08.2026: був POST, що віддавав JSON із посиланням, у якому
+  // лежав NOVA_POSHTA_API_KEY, — і адмінка це посилання просто відкидала,
+  // тобто кнопка друку не працювала взагалі. Тепер GET, що віддає САМ PDF:
+  // ключ не залишає сервера, а кнопка відкриває накладну в новій вкладці
+  // (GET верхнього рівня несе cookie сесії, бо вона SameSite=lax).
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
-  @Post('admin/orders/:id/ttn/print')
-  printLabel(@Param('id') id: string) {
-    return this.service.printLabel(id);
+  @Get('admin/orders/:id/ttn/print')
+  async printLabel(@Param('id') id: string, @Res() res: Response) {
+    const pdf = await this.service.printLabel(id);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Length': String(pdf.byteLength),
+      'Content-Disposition': `inline; filename="ttn-${id}.pdf"`,
+      // Накладна — документ конкретного замовлення; проміжним кешам його
+      // класти нікуди.
+      'Cache-Control': 'private, no-store',
+    });
+    res.end(pdf);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

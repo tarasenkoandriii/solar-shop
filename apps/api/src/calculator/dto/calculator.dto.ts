@@ -8,9 +8,15 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
   MinLength,
+  Validate,
   ValidateNested,
+  ValidatorConstraint,
+  isEmail,
+  type ValidationArguments,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
 
 // ТЗ п.31.1 — шаги квиза (гео/бюджет/цели/мощность/финансирование)
@@ -139,13 +145,63 @@ export class AddToCartDto {
   productIds?: string[]; // конкретные позиции; если не передано — вся спецификация целиком
 }
 
+// Два DTO нижче називають поле каналу по-різному: SendPackageDto — channel,
+// RequestDocumentsDto — contactChannel. Читаємо обидва: якщо взяти лише
+// одне ім'я, для другого DTO значення виявиться undefined і перевірка
+// email мовчки не спрацює — рівно той тип помилки, який цей аудит і ловить.
+function channelOf(object: object): string | undefined {
+  const o = object as { channel?: string; contactChannel?: string };
+  return o.channel ?? o.contactChannel;
+}
+
+@ValidatorConstraint({ name: 'contactValueMatchesChannel' })
+export class ContactValueMatchesChannel implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    if (typeof value !== 'string') return false;
+    // Для email — сувора перевірка адреси. Для whatsapp/viber те саме поле
+    // означає телефон для діплінку, для telegram воно ігнорується
+    // (chat_id береться з User) — там достатньо непорожнього рядка
+    // розумної довжини.
+    if (channelOf(args.object) === 'email') return isEmail(value);
+    return value.trim().length > 0 && value.length <= 64;
+  }
+
+  defaultMessage(args: ValidationArguments): string {
+    return channelOf(args.object) === 'email'
+      ? 'Для каналу email потрібна коректна email-адреса'
+      : 'Некоректний контакт для обраного каналу';
+  }
+}
+
 export class SendPackageDto {
   @IsIn(['telegram', 'whatsapp', 'viber', 'email'])
   channel!: 'telegram' | 'whatsapp' | 'viber' | 'email';
 
+  // Аудит 27.08.2026: тут стояв самий лише @IsString(), а нижче за текстом
+  // це значення йшло прямо в `to:` при відправці листа — тобто наш домен
+  // (noreply@solarshop.ua) розсилав листи на будь-яку адресу, яку попросив
+  // анонімний відвідувач. Це репутація домену і ліміти Resend.
+  //
+  // Перевірка залежить від каналу: суцільний @IsEmail не годиться, бо для
+  // whatsapp/viber те саме поле — це телефон для діплінку, а для telegram
+  // воно взагалі ігнорується (chat_id береться з User).
+  //
+  // Лишається залишковий ризик: надіслати СВІЙ кошторис на чужу адресу все
+  // одно можна — це, власне, і є фіча ("надішли монтажнику"). Від спаму
+  // тримає RateLimitGuard (5/хв); окремо зазначу, що до цього аудиту він
+  // обходився підробкою X-Forwarded-For, і лише тепер справді працює —
+  // див. hardenExpress().
+  //
+  // Реалізовано власним валідатором, а не парою @ValidateIf: кілька
+  // @ValidateIf на одному полі складаються через І, тож
+  // `channel === 'email'` разом із `channel !== 'email'` дали б умову, яка
+  // не виконується ніколи — і поле не перевірялося б узагалі.
   @IsString()
-  contactValue!: string; // email-адрес, телефон для wa.me/Viber-діплінку — Telegram бере chat_id з User, contactValue ігнорується
+  @MaxLength(254)
+  @Validate(ContactValueMatchesChannel)
+  contactValue!: string;
 }
+
 
 // ТЗ п.31.11.0 — чек-лист документів перед batch-генерацией. Найдено при
 // полном аудите (AUDIT-FULL.md): раньше типизировался inline-объектом в
@@ -160,7 +216,11 @@ export class RequestDocumentsDto {
   @IsIn(['telegram', 'whatsapp', 'viber', 'email'])
   contactChannel!: 'telegram' | 'whatsapp' | 'viber' | 'email';
 
+  // Той самий випадок, що й у SendPackageDto вище: звідси адреса теж їде
+  // прямо в `to:` при відправці бізнес-плану.
   @IsString()
+  @MaxLength(254)
+  @Validate(ContactValueMatchesChannel)
   contactValue!: string;
 
   @IsOptional()

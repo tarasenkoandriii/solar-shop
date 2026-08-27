@@ -11,6 +11,7 @@ import { RateLimit } from '../rate-limit/decorators/rate-limit.decorator';
 import { CalculatorService } from './calculator.service';
 import { CalculatorSettingsService } from '../calculator-settings/calculator-settings.service';
 import { StartCalculatorDto, RefineCalculatorDto, UpdateSpecDto, AddToCartDto, SendPackageDto, RequestDocumentsDto } from './dto/calculator.dto';
+import { MergeGuestSessionDto } from '../common/dto/session-id.dto';
 
 @Controller()
 export class CalculatorController {
@@ -146,11 +147,17 @@ export class CalculatorController {
 
   // ТЗ п.31.7 — вызывается фронтендом сразу после успешного Telegram-логина,
   // тот же паттерн, что CartController.mergeGuestCart
+  //
+  // Аудит 27.08.2026 — найгостріший випадок тієї самої дірки, що й у
+  // CartController.mergeGuestCart: тут за нею стоїть не findFirst, а
+  // updateMany. Тіло `{ "sessionId": { "not": null } }` перетворювало
+  // умову `where: { sessionId, userId: null }` на "всі гостьові розрахунки
+  // в базі" — і ОДИН запит від будь-якого залогіненого користувача
+  // переписував їх усі на нього. Детальніше — у MergeGuestSessionDto.
   @UseGuards(JwtAuthGuard)
   @Post('calculator/merge')
-  async mergeGuestEstimates(@CurrentUser() user: { sub: string }, @Body('sessionId') sessionId: string) {
-    if (!sessionId) return { merged: 0 };
-    return this.service.mergeGuestEstimates(sessionId, user.sub);
+  async mergeGuestEstimates(@CurrentUser() user: { sub: string }, @Body() dto: MergeGuestSessionDto) {
+    return this.service.mergeGuestEstimates(dto.sessionId, user.sub);
   }
 
   // ТЗ п.31.7 — /account/projects

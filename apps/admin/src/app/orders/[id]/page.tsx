@@ -109,13 +109,22 @@ export default function OrderDetailPage({ params }: { params: { id: string } }) 
           </button>
         ) : (
           <>
-            <button
-              disabled={busy}
-              onClick={() => runAction(() => apiFetch(`/admin/orders/${order.id}/ttn/print`, { method: 'POST' }))}
+            {/*
+              Аудит 27.08.2026: тут был POST через apiFetch, результат
+              которого просто выбрасывался — кнопка не открывала ничего.
+              А в ответе приходила ссылка с NOVA_POSHTA_API_KEY внутри.
+              Теперь эндпоинт отдаёт сам PDF; открываем его в новой
+              вкладке — запросы админки идут same-origin через /api/*,
+              поэтому сессионная cookie уходит штатно.
+            */}
+            <a
+              href={`/api/admin/orders/${order.id}/ttn/print`}
+              target="_blank"
+              rel="noopener noreferrer"
               className="rounded-full border border-leaf-800/20 px-4 py-2 text-sm text-leaf-900 dark:border-white/20 dark:text-white"
             >
               {d.printLabel} ({order.ttnNumber})
-            </button>
+            </a>
             <button
               disabled={busy}
               onClick={() => runAction(() => apiFetch(`/admin/orders/${order.id}/ttn/cancel`, { method: 'POST' }))}

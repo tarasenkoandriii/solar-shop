@@ -380,9 +380,27 @@ async function main() {
   }
 
   console.log('Seeding exchange rate...');
+  // АУДИТ 27.08.2026. Тут стояв ключ `currency_rateDate`, а складений
+  // унікальний у схемі — `@@unique([countryCode, currency, rateDate])`,
+  // тобто називається `countryCode_currency_rateDate` (саме так, як у
+  // currency.service.ts:37). Сид виконується через `ts-node
+  // --transpile-only`, тож типи не перевіряються — і цей рядок ПАДАВ у
+  // рантаймі. А scripts/db-bootstrap.js помилку сида ковтає (console.warn,
+  // не exit), тому падіння було невидиме.
+  //
+  // Наслідки ширші за один курс: усе, що сіється ПІСЛЯ цього рядка —
+  // цілі проєктів, шаблони схем, координати НП для PVGIS, тарифи,
+  // програми фінансування — не засівалося взагалі на жодному чистому
+  // оточенні.
+  //
+  // Окремо важливо саме зараз: доти OrdersService мовчки падав на фолбек
+  // 41.5 при порожній таблиці, і баг ніяк не проявлявся. Тепер курс
+  // обовʼязковий — тож без цього виправлення кожен чекаут на свіжо
+  // піднятому магазині повертав би "Курс валют тимчасово недоступний".
+  const rateDate = new Date(new Date().toDateString());
   await prisma.exchangeRate.upsert({
-    where: { currency_rateDate: { currency: 'USD', rateDate: new Date(new Date().toDateString()) } },
-    create: { currency: 'USD', rateUah: RATE_UAH, rateDate: new Date(new Date().toDateString()) },
+    where: { countryCode_currency_rateDate: { countryCode: 'UA', currency: 'USD', rateDate } },
+    create: { countryCode: 'UA', currency: 'USD', rateUah: RATE_UAH, rateDate },
     update: {},
   });
 

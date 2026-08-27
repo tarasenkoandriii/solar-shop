@@ -65,6 +65,15 @@ COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/packages/db ./packages/db
 COPY --from=build /repo/apps/api/dist ./apps/api/dist
 COPY --from=build /repo/apps/api/package.json ./apps/api/package.json
+# АУДИТ 27.08.2026: цього рядка не було, і жодного іншого, що копіює
+# apps/api/assets. А InvoiceService читає звідти кириличний шрифт:
+#   path.join(__dirname, '../../assets/fonts/NotoSans-Regular.ttf')
+# тобто /repo/apps/api/assets/fonts/... — шлях, якого в образі не існувало.
+# Наслідок: КОЖНА генерація PDF (рахунок замовлення, кошторис проєкту,
+# бізнес-план) кидала виняток у проді. "Сформувати рахунок" віддавало 500,
+# пакетна генерація позначала кожен проєкт FAILED. Для Vercel те саме
+# лікується окремо — через functions.includeFiles у vercel.json.
+COPY --from=build /repo/apps/api/assets ./apps/api/assets
 EXPOSE 3001
 # Знайдено 18.08.2026: у репозиторії досі НЕМАЄ жодної Prisma-міграції
 # (packages/db/prisma/migrations/ не існує — в пісочниці, де писався код,

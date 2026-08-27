@@ -5,6 +5,18 @@
 # docker-compose.yml. Якщо кореневого /.env немає — використовуються
 # дефолти після `:-` в кожному записі, `docker compose up` працює й без
 # нього "з коробки" для локальної розробки.
+#
+# ВИНЯТОК (аудит 27.08.2026): у секретів дефолту БІЛЬШЕ НЕМАЄ — раніше тут
+# стояли літерали `dev-secret-change-me` і `dev-cron-secret`, тобто будь-який
+# запуск цього файлу далі локальної машини йшов із відомим усім секретом
+# підпису сесій. Тепер порожньо, а відмовляє сам застосунок. Мінімальний
+# /.env для локального запуску:
+#   JWT_SECRET=<openssl rand -base64 48>
+#   CRON_SECRET=<openssl rand -hex 24>
+#   ENABLE_DEV_LOGIN=true   # лише якщо потрібен вхід в адмінку без Telegram
+# Без перших двох `docker compose up` підніметься, але api впаде при старті
+# з поясненням у логах — це навмисно: команди на кшталт `logs api` і
+# `exec postgres psql` мають лишатися робочими саме тоді, коли щось не так.
 services:
   postgres:
     image: postgres:16
@@ -34,12 +46,36 @@ services:
       # на Supabase (Vercel-деплой, .env.example) вони РІЗНІ.
       DIRECT_URL: postgresql://dev:dev@postgres:5432/solarshop
       PORT: 3001
-      JWT_SECRET: dev-secret-change-me
-      NODE_ENV: development
-      # Локальная разработка под Docker Compose — dev-вход в админку без
-      # Telegram (см. README раздел про dev-логин). Убрать/поставить false
-      # при любом деплое, где docker-compose используется не только локально.
-      ENABLE_DEV_LOGIN: "true"
+      # АУДИТ 27.08.2026. Раніше тут стояли ТРИ літерали:
+      #   JWT_SECRET: dev-secret-change-me
+      #   NODE_ENV: development
+      #   ENABLE_DEV_LOGIN: "true"
+      # Літерал (на відміну від ${VAR:-default}) НЕ перекривається значенням
+      # із /.env — тобто навіть правильно налаштоване оточення ігнорувалося.
+      # Разом ці три рядки означали: будь-який деплой цього compose далі
+      # локальної машини = відома всім константа підпису сесій ПЛЮС
+      # відкритий вхід в адмінку без Telegram (подвійний захист
+      # AuthService.assertDevLoginEnabled вимикався тим самим файлом, який
+      # його й мав би страхувати).
+      #
+      # `:-` з ПОРОЖНІМ дефолтом, а не `:?`. Спершу тут стояло `:?` — і це
+      # була помилка: Compose інтерполює ВЕСЬ файл при завантаженні, тож
+      # падали й ті команди, що взагалі не піднімають api — `docker compose
+      # up -d postgres`, `logs api`, `exec postgres psql`, `restart api`.
+      # Тобто перший крок діагностики з README ставав неможливим.
+      #
+      # Вимога до секрета нікуди не поділася, вона просто на правильному
+      # рівні: AuthModule кидає при старті, якщо JWT_SECRET порожній або
+      # дорівнює старій dev-константі. Compose лишається робочим
+      # інструментом, застосунок сам себе не запускає без секрета.
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Тепер перекривається з оточення. Для будь-якого не-локального
+      # запуску став NODE_ENV=production: це друга, незалежна перевірка,
+      # яка блокує dev-вхід навіть при випадково увімкненому прапорці.
+      NODE_ENV: ${NODE_ENV:-development}
+      # Dev-вхід в адмінку без Telegram (README, розділ про dev-логін).
+      # Дефолт ТЕПЕР false — вмикається явно, на час локальної роботи.
+      ENABLE_DEV_LOGIN: ${ENABLE_DEV_LOGIN:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-000000:dev-placeholder-token}
       TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN:-111111:dev-admin-placeholder-token}
       TELEGRAM_MANAGER_CHAT_ID: ${TELEGRAM_MANAGER_CHAT_ID:-}
@@ -62,7 +98,13 @@ services:
       # незалежно від того, чи воно реально задане.
       GROK_MANAGEMENT_API_KEY: ${GROK_MANAGEMENT_API_KEY:-}
       GROK_TEAM_ID: ${GROK_TEAM_ID:-}
-      CRON_SECRET: ${CRON_SECRET:-dev-cron-secret}
+      # Аудит 27.08.2026: був передбачуваний дефолт `dev-cron-secret`. Цим
+      # заголовком захищено InternalCronController — зовнішній запуск
+      # парсера, розсилок і всіх платних викликів. Порожній дефолт із тієї
+      # ж причини, що й у JWT_SECRET вище: контролер і так відмовляє при
+      # незаданому CRON_SECRET, а вгадуваний дефолт був гіршим за його
+      # відсутність.
+      CRON_SECRET: ${CRON_SECRET:-}
       NOVA_POSHTA_API_KEY: ${NOVA_POSHTA_API_KEY:-}
       NOVA_POSHTA_CITY_SENDER_REF: ${NOVA_POSHTA_CITY_SENDER_REF:-}
       NOVA_POSHTA_SENDER_REF: ${NOVA_POSHTA_SENDER_REF:-}
@@ -75,6 +117,11 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # Аудит 27.08.2026: без цього рядка змінна фізично не долітала б у
+      # контейнер (тут ЯВНИЙ список environment:, не env_file:) — та сама
+      # пастка, що вже була з GROK_MANAGEMENT_API_KEY вище.
+      TRUSTED_CLIENT_IP_HEADER: ${TRUSTED_CLIENT_IP_HEADER:-}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       CORS_ORIGINS: http://localhost:3000,http://localhost:3002,http://localhost:3003
     ports: ["3001:3001"]
     depends_on:
@@ -88,7 +135,12 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: http://localhost:3001
-        NEXT_PUBLIC_ENABLE_DEV_LOGIN: "true"
+        # Аудит 27.08.2026: тут лишався жорсткий літерал "true", тоді як
+        # ENABLE_DEV_LOGIN у api вже став ${ENABLE_DEV_LOGIN:-false}. Разом
+        # це давало найгірший варіант: кнопка "Dev-вхід" на фронтенді
+        # видима, а клік по ній повертає 404. Тепер обидві сторони читають
+        # ОДНУ змінну.
+        NEXT_PUBLIC_ENABLE_DEV_LOGIN: ${ENABLE_DEV_LOGIN:-false}
         # Той самий клас проблеми, що з API_INTERNAL_URL нижче — NEXT_PUBLIC_*
         # запікається в клієнтський бандл на етапі next build, не в
         # рантаймі, тому обов'язково і тут, у build.args, не тільки в
@@ -124,7 +176,12 @@ services:
       dockerfile: apps/admin/Dockerfile
       args:
         NEXT_PUBLIC_TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME:-solarshop_admin_bot}
-        NEXT_PUBLIC_ENABLE_DEV_LOGIN: "true"
+        # Аудит 27.08.2026: тут лишався жорсткий літерал "true", тоді як
+        # ENABLE_DEV_LOGIN у api вже став ${ENABLE_DEV_LOGIN:-false}. Разом
+        # це давало найгірший варіант: кнопка "Dev-вхід" на фронтенді
+        # видима, а клік по ній повертає 404. Тепер обидві сторони читають
+        # ОДНУ змінну.
+        NEXT_PUBLIC_ENABLE_DEV_LOGIN: ${ENABLE_DEV_LOGIN:-false}
         # Той самий фікс, що для web вище (детальний коментар там)
         API_INTERNAL_URL: http://api:3001
     environment:

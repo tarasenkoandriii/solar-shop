@@ -6,6 +6,7 @@ import { ValidationPipe } from '@nestjs/common';
 import express, { type Express } from 'express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module';
+import { hardenExpress } from '../src/common/harden-express';
 
 // Vercel serverless entrypoint (Hobby): файлы під apps/api/api/* стають
 // функціями автоматично (zero-config Node runtime). NestJS-застосунок
@@ -32,6 +33,10 @@ let cachedApp: Express;
 
 async function bootstrapServer(): Promise<Express> {
   const expressApp = express();
+  // Аудит 27.08.2026: спільні налаштування Express для ОБОХ точок входу —
+  // розбір query і довіра до проксі. Тримати їх в одному місці критично
+  // саме тут: це прод, і все, що дописано лише в main.ts, сюди не долітає.
+  hardenExpress(expressApp);
   const adapter = new ExpressAdapter(expressApp);
   const app = await NestFactory.create(AppModule, adapter);
 

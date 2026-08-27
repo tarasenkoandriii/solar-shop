@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
+import { roundToCents } from '../common/money';
 
 @Injectable()
 export class CartService {
@@ -30,23 +31,27 @@ export class CartService {
 
   async addItem(userId: string | null, sessionId: string | null, productId: string, quantity = 1) {
     const cart = await this.getOrCreateCart(userId, sessionId);
-    const cheapest = await this.products.getCheapestInStockListing(productId);
-    if (!cheapest) throw new NotFoundException('Product has no in-stock listing right now');
+    // Аудит 27.08.2026: тут стояв getCheapestInStockListing(), і в
+    // priceSnapshot лягала ціна найдешевшого листинга — тобто наша
+    // СОБІВАРТІСТЬ, тоді як вітрина показує cachedPriceUsd. Покупець бачив
+    // одну ціну, а платив меншу. Розгорнуто — у ProductsService.getPurchaseTerms().
+    const terms = await this.products.getPurchaseTerms(productId);
+    if (!terms) throw new NotFoundException('Product has no in-stock listing right now');
 
     await this.prisma.client.cartItem.upsert({
       where: {
         cartId_productId_listingId: {
           cartId: cart.id,
           productId,
-          listingId: cheapest.sourceListingId,
+          listingId: terms.listingId,
         },
       },
       create: {
         cartId: cart.id,
         productId,
-        listingId: cheapest.sourceListingId,
+        listingId: terms.listingId,
         quantity,
-        priceSnapshot: cheapest.sourceListing.priceUsd,
+        priceSnapshot: terms.priceUsd,
       },
       update: { quantity: { increment: quantity } },
     });
@@ -132,12 +137,40 @@ export class CartService {
     await this.prisma.client.cartItem.deleteMany({ where: { cartId } });
   }
 
+  // АУДИТ 27.08.2026 — третій шлях витоку собівартості, знайдений уже при
+  // перевірці власних правок. Собівартість закрили в замовленнях
+  // (OrdersService.toCustomerView) і в каталозі (PUBLIC_PRODUCT_SELECT), а
+  // кошик лишався: `include: { product: ... }` тягнув увесь рядок Product
+  // разом із cachedCostPriceUsd, і GET /cart під OptionalAuthGuard віддавав
+  // це гостю. Тобто закупівельну ціну було видно просто поклавши товар у
+  // кошик.
+  //
+  // Явний select замість include — з тієї ж причини, що й у каталозі: нове
+  // поле в схемі за замовчуванням НЕ потрапляє у видачу, і помилка
+  // проявиться як "поля немає на фронті", а не як мовчазний витік.
   async getCartWithTotals(cartId: string) {
     const cart = await this.prisma.client.cart.findUniqueOrThrow({
       where: { id: cartId },
-      include: { items: { include: { product: { include: { images: true } } } } },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                slug: true,
+                name: true,
+                articleNumber: true,
+                category: true,
+                cachedPriceUsd: true,
+                cachedInStock: true,
+                images: { orderBy: { sortOrder: 'asc' } },
+              },
+            },
+          },
+        },
+      },
     });
-    const subtotalUsd = cart.items.reduce((sum, i) => sum + Number(i.priceSnapshot) * i.quantity, 0);
+    const subtotalUsd = roundToCents(cart.items.reduce((sum, i) => sum + Number(i.priceSnapshot) * i.quantity, 0));
     return { ...cart, subtotalUsd };
   }
 }

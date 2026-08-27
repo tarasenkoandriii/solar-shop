@@ -2,6 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { fetchWithRetry } from '../common/fetch-with-retry';
 
+// Ліміт Telegram на sendMessage — 4096 символів UTF-16; більше = HTTP 400
+// і втрачена заявка. Ріжемо з запасом і ставимо маркер, щоб було видно:
+// повідомлення обрізане, повний текст треба дивитися в адмінці.
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+const TRUNCATION_MARK = '\n… (обрізано, повний текст в адмінці)';
+
+function truncateForTelegram(text: string): string {
+  if (text.length <= TELEGRAM_MESSAGE_LIMIT) return text;
+  return text.slice(0, TELEGRAM_MESSAGE_LIMIT - TRUNCATION_MARK.length) + TRUNCATION_MARK;
+}
+
 // ТЗ п.28.1 — уведомления менеджеру через того же бота, что и TMA/Login
 // Widget (не отдельный). Триггеры вызываются точечно из OrdersService/
 // CronModule в нужных местах (см. вызовы notifyNewOrder/notifyOrderPaid/...).
@@ -11,8 +22,13 @@ export class NotifyService {
 
   constructor(private readonly config: ConfigService) {}
 
+  // Усі обгортки нижче ПОВЕРТАЮТЬ результат доставки, а не ковтають його.
+  // Спершу я змінив тільки приватний send() — і правка вийшла холостою:
+  // обгортки робили `await this.send(...)` і відкидали булеве значення, тож
+  // жоден викликач так само не міг дізнатися, чи дійшло сповіщення.
+  // Тепер може: `if (!(await notify.notifyLead(...))) { ... }`.
   async notifyNewOrder(order: { id: string; contactName: string; contactPhone: string; totalUah: number; itemsSummary: string }) {
-    await this.send(
+    return this.send(
       `🆕 Нове замовлення #${order.id.slice(-8)}\n` +
         `${order.contactName}, ${order.contactPhone}\n` +
         `${order.itemsSummary}\n` +
@@ -21,24 +37,24 @@ export class NotifyService {
   }
 
   async notifyOrderPaid(orderId: string) {
-    await this.send(`✅ Замовлення #${orderId.slice(-8)} оплачено — можна передавати перевізнику`);
+    return this.send(`✅ Замовлення #${orderId.slice(-8)} оплачено — можна передавати перевізнику`);
   }
 
   async notifyTtnCreationFailed(orderId: string, reason: string) {
-    await this.send(`⚠️ Не вдалось автоматично створити ТТН для замовлення #${orderId.slice(-8)}: ${reason}\nСтворіть вручну в адмінці.`);
+    return this.send(`⚠️ Не вдалось автоматично створити ТТН для замовлення #${orderId.slice(-8)}: ${reason}\nСтворіть вручну в адмінці.`);
   }
 
   async notifyCronFailed(jobKey: string, errorMessage: string) {
-    await this.send(`❌ Крон-джоб "${jobKey}" завершився з помилкою:\n${errorMessage}`);
+    return this.send(`❌ Крон-джоб "${jobKey}" завершився з помилкою:\n${errorMessage}`);
   }
 
   async notifyLead(lead: { name: string; phone: string; comment?: string | null }) {
-    await this.send(`📩 Нове звернення з сайту\n${lead.name}, ${lead.phone}${lead.comment ? `\n"${lead.comment}"` : ''}`);
+    return this.send(`📩 Нове звернення з сайту\n${lead.name}, ${lead.phone}${lead.comment ? `\n"${lead.comment}"` : ''}`);
   }
 
   // ТЗ п.31.8 — новый расчёт калькулятора тоже тёплый лид, даже если ещё не Order
   async notifyCalculatorLead(estimate: { id: string; city: string | null; totalUsd: number; goals: string[] }) {
-    await this.send(
+    return this.send(
       `🧮 Новий розрахунок калькулятора #${estimate.id.slice(-8)}\n` +
         `Місто: ${estimate.city ?? '—'}\n` +
         `Цілі: ${estimate.goals.join(', ') || '—'}\n` +
@@ -80,23 +96,49 @@ export class NotifyService {
     }
   }
 
-  private async send(text: string): Promise<void> {
+  // АУДИТ 27.08.2026. Тут було дві незалежні проблеми.
+  //
+  // 1. Результат не перевірявся на res.ok, а fetchWithRetry при вичерпанні
+  //    спроб ПОВЕРТАЄ відповідь, а не кидає. Тобто 400 "message is too
+  //    long", 403 "bot was kicked from the group" і 429 проходили як успіх
+  //    — без запису навіть у лог. Замовлення, лід і розрахунок лягали в
+  //    базу, менеджер про них не дізнавався, і ніде не лишалося сліду, що
+  //    сповіщення не дійшло. Сусідній sendDocumentToUser написаний
+  //    правильно (повертає res.ok) — розходився саме менеджерський шлях.
+  //
+  // 2. Довжина не обмежувалася. Ліміт Telegram — 4096 символів; коментар
+  //    ліда (CreateLeadDto без @MaxLength) або довгий перелік позицій
+  //    замовлення легко його перевалювали, і заявка мовчки зникала.
+  //
+  // Виняток назовні свідомо НЕ кидаємо: замовлення вже створене, ронити
+  // запит покупця через збій сповіщення менеджеру не можна. Але тепер це
+  // гучна помилка в лог із текстом відповіді Telegram, а не тиша.
+  private async send(text: string): Promise<boolean> {
     const botToken = this.config.get<string>('TELEGRAM_BOT_TOKEN');
     const chatId = this.config.get<string>('TELEGRAM_MANAGER_CHAT_ID');
     if (!botToken || !chatId) {
       this.logger.warn('TELEGRAM_BOT_TOKEN/TELEGRAM_MANAGER_CHAT_ID not configured — skipping notification');
-      return;
+      return false;
     }
 
     try {
-      await fetchWithRetry(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const res = await fetchWithRetry(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         retries: 2,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
+        body: JSON.stringify({ chat_id: chatId, text: truncateForTelegram(text) }),
       });
+      if (!res.ok) {
+        // Тіло відповіді Telegram містить description із причиною —
+        // саме воно й потрібне, щоб зрозуміти, чому сповіщення не дійшло.
+        const body = await res.text().catch(() => '');
+        this.logger.error(`Сповіщення менеджеру НЕ доставлено: Telegram відповів HTTP ${res.status}. ${body.slice(0, 500)}`);
+        return false;
+      }
+      return true;
     } catch (err) {
-      this.logger.error('Failed to send Telegram notification', err as Error);
+      this.logger.error('Сповіщення менеджеру НЕ доставлено (мережева помилка)', err as Error);
+      return false;
     }
   }
 }

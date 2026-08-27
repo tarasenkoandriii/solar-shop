@@ -3,6 +3,7 @@ import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { CartService } from './cart.service';
 import { AddCartItemDto, UpdateCartItemDto } from './dto/cart.dto';
+import { MergeGuestSessionDto } from '../common/dto/session-id.dto';
 
 @UseGuards(OptionalAuthGuard)
 @Controller('cart')
@@ -23,10 +24,16 @@ export class CartController {
   // гостевую корзину (localStorage sessionId) в корзину авторизованного
   // пользователя (ТЗ п.19.2). Отдельный эндпоинт вместо вызова из
   // AuthService напрямую — избегаем циклической зависимости CartModule↔AuthModule.
+  //
+  // Аудит 27.08.2026: було `@Body('sessionId') sessionId: string` — примітив
+  // із тіла запиту, який глобальний ValidationPipe не перевіряє в принципі
+  // (детально — у коментарі до MergeGuestSessionDto). Обʼєкт
+  // `{ "not": null }` долітав до `where: { sessionId }` і віддавав чужий
+  // кошик. Тепер DTO-клас, тобто штатна валідація.
   @Post('merge')
-  async mergeGuestCart(@CurrentUser() user: { sub: string } | undefined, @Body('sessionId') sessionId: string) {
-    if (!user || !sessionId) return { merged: false };
-    await this.service.mergeGuestCartIntoUser(sessionId, user.sub);
+  async mergeGuestCart(@CurrentUser() user: { sub: string } | undefined, @Body() dto: MergeGuestSessionDto) {
+    if (!user) return { merged: false };
+    await this.service.mergeGuestCartIntoUser(dto.sessionId, user.sub);
     return { merged: true };
   }
 

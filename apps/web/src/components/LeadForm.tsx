@@ -9,7 +9,14 @@ export function LeadForm({ dict }: { dict: Dictionary }) {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setStatus('sending');
-    const form = new FormData(e.currentTarget);
+    // Аудит 27.08.2026: нижче стояло `if (res.ok) e.currentTarget.reset()`
+    // ПІСЛЯ await. React обнуляє currentTarget, щойно обробник повертає
+    // керування, тож звернення до нього кидало TypeError — а він потрапляв
+    // у власний catch форми й перебивав уже виставлений статус 'sent'.
+    // Тобто лід лягав у базу, а клієнт бачив помилку й надсилав заявку ще
+    // раз. Зберігаємо посилання на форму ДО await.
+    const formEl = e.currentTarget;
+    const form = new FormData(formEl);
     const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
     try {
       const res = await fetch(`${apiUrl}/leads`, {
@@ -23,7 +30,7 @@ export function LeadForm({ dict }: { dict: Dictionary }) {
         }),
       });
       setStatus(res.ok ? 'sent' : 'error');
-      if (res.ok) e.currentTarget.reset();
+      if (res.ok) formEl.reset();
     } catch {
       setStatus('error');
     }

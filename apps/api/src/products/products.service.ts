@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, ProductStatus } from '@solar-shop/db';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -20,8 +20,61 @@ function slugify(name: string, suffix: string): string {
   );
 }
 
+// АУДИТ 27.08.2026. Публічні ендпоінти каталогу віддавали рядок Product
+// ЦІЛКОМ (`include` без `select`), а разом із ним — cachedCostPriceUsd,
+// тобто нашу закупівельну ціну. Картка товару додатково тягла
+// `vendor: true`, тобто ВЕСЬ запис постачальника: contactPhone,
+// contactPersonName, contactAddress, contractStatus, contractSignedAt,
+// contractNote. Конкурент викачував собівартість і повний список
+// постачальників із контактами звичайним обходом каталогу, без авторизації.
+//
+// Явний allow-list замість `omit` свідомо: при додаванні нового поля в
+// схему воно за замовчуванням НЕ потрапляє у видачу, і помилка проявиться
+// як "поля немає на фронті", а не як мовчазний витік.
+const PUBLIC_PRODUCT_SELECT = {
+  id: true,
+  slug: true,
+  name: true,
+  shortDescription: true,
+  description: true,
+  articleNumber: true,
+  manufacturerSku: true,
+  category: true,
+  status: true,
+  specs: true,
+  metaTitle: true,
+  metaDescription: true,
+  cachedPriceUsd: true,
+  cachedInStock: true,
+  cachedIsPromo: true,
+  cachedDiscountPercent: true,
+  cachedWarehouseCities: true,
+  cachedIsNew: true,
+  manufacturerId: true,
+  createdAt: true,
+  // ЗАЛИШЕНО ЗА БОРТОМ СВІДОМО: cachedCostPriceUsd (внутрішня собівартість).
+} satisfies Prisma.ProductSelect;
+
+// Те, що покупцю справді треба знати про постачальника на картці товару:
+// у якому місті лежить і чи є в наявності. Ні контактів, ні статусу
+// договору, ні закупівельної ціни листингу.
+const PUBLIC_LISTINGS_SELECT = {
+  id: true,
+  sourceListing: {
+    select: {
+      id: true,
+      inStock: true,
+      isPromo: true,
+      discountPercent: true,
+      vendor: { select: { id: true, name: true, warehouseCities: true, countryCode: true } },
+    },
+  },
+} satisfies Prisma.ProductListingSelect;
+
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly pricing: ProductPricingService,
@@ -72,7 +125,11 @@ export class ProductsService {
         orderBy,
         skip: (page - 1) * pageSize,
         take: pageSize,
-        include: { manufacturer: true, images: { orderBy: { sortOrder: 'asc' } } },
+        select: {
+          ...PUBLIC_PRODUCT_SELECT,
+          manufacturer: true,
+          images: { orderBy: { sortOrder: 'asc' } },
+        },
       }),
       this.prisma.client.product.count({ where }),
     ]);
@@ -88,12 +145,11 @@ export class ProductsService {
   async findBySlug(slug: string) {
     const product = await this.prisma.client.product.findUnique({
       where: { slug },
-      include: {
+      select: {
+        ...PUBLIC_PRODUCT_SELECT,
         manufacturer: true,
         images: { orderBy: { sortOrder: 'asc' } },
-        listings: {
-          include: { sourceListing: { include: { vendor: true } } },
-        },
+        listings: { select: PUBLIC_LISTINGS_SELECT },
       },
     });
     if (!product || product.status !== ProductStatus.PUBLISHED) throw new NotFoundException('Product not found');
@@ -108,8 +164,86 @@ export class ProductsService {
     return { ...product, reviewAggregate: aggregates[product.id] ?? { reviewCount: 0, avgReliabilityScore: null } };
   }
 
+  // АУДИТ 27.08.2026 — головна знахідка першого проходу.
+  //
+  // Було так: і CartService.addItem, і OrdersService.buyNow брали
+  // getCheapestInStockListing() і клали в priceSnapshot ЙОГО ціну. Але
+  // "найдешевший листинг" — це рівно те, що pricing.ts називає
+  // cachedCostPriceUsd, тобто НАША СОБІВАРТІСТЬ:
+  //
+  //   const cheapest = sorted[0];                          → cachedCostPriceUsd
+  //   const publicListing = sorted.length >= 2 ? sorted[1] : sorted[0];  → cachedPriceUsd
+  //
+  // Вітрина ж показує cachedPriceUsd (ProductCard.tsx). Тобто покупець
+  // бачив одну ціну, а платив меншу — нульова або відʼємна маржа на
+  // КОЖНОМУ товарі, у якого більше одного листинга в наявності.
+  //
+  // Чому це не помітили: вкладка "Прибуток" порівнює OrderItem.priceUsd
+  // (собівартість) з OrderItem.costPriceUsd (та сама собівартість) і чесно
+  // показує прибуток ≈ 0. Звіт не зламаний — він показував правду.
+  //
+  // Тепер одна точка істини на два питання відразу: що ми беремо з покупця
+  // і в скільки товар обходиться нам. Розводити ці два числа по різних
+  // сервісах — саме те, що й призвело до помилки.
+  async getPurchaseTerms(productId: string): Promise<{ listingId: string; priceUsd: number; costPriceUsd: number } | null> {
+    const cheapest = await this.getCheapestInStockListing(productId);
+    if (!cheapest) return null;
+
+    const readCache = () =>
+      this.prisma.client.product.findUnique({
+        where: { id: productId },
+        select: { cachedPriceUsd: true, cachedCostPriceUsd: true },
+      });
+
+    let product = await readCache();
+
+    // Кеш вважаємо протухлим у ДВОХ випадках, і другий знайшовся вже при
+    // перевірці цієї ж правки:
+    //
+    // 1. Ціни немає взагалі — парсер ще не перераховував.
+    // 2. Публічна ціна НИЖЧА за найдешевший наявний листинг. Так буває,
+    //    коли дешеві листинги пішли з наявності, а перерахунок ще не
+    //    відпрацював: у кеші лишилося $100, а реально найдешевший — $200.
+    //    Продати за $100 те, що коштує нам $200, — це той самий баг, який
+    //    ця функція й лікує, тільки з іншим знаком.
+    //
+    // Ціну листинга сюди НЕ підставляємо в жодному разі: це рівно та
+    // мовчазна підміна публічної ціни собівартістю, з якої все й почалося.
+    // Замість цього перераховуємо кеш і читаємо ще раз.
+    const cheapestUsd = Number(cheapest.sourceListing.priceUsd);
+    const stale = product?.cachedPriceUsd == null || Number(product.cachedPriceUsd) < cheapestUsd;
+
+    if (stale) {
+      try {
+        await this.pricing.recalculate(productId);
+      } catch (err) {
+        // Товар могли видалити між двома запитами — тоді recalculate
+        // кидає P2025. Це не 500: для викликача це просто "товар
+        // недоступний", далі буде коректний 404/BadRequest.
+        this.logger.warn(`Не вдалося перерахувати ціну товару ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      product = await readCache();
+    }
+
+    if (product?.cachedPriceUsd == null) return null;
+
+    return {
+      listingId: cheapest.sourceListingId,
+      priceUsd: Number(product.cachedPriceUsd),
+      // Собівартість на момент замовлення. Фолбек на ціну найдешевшого
+      // листинга тут доречний і безпечний: це саме те число, з якого
+      // cachedCostPriceUsd і рахується.
+      costPriceUsd: product.cachedCostPriceUsd == null ? Number(cheapest.sourceListing.priceUsd) : Number(product.cachedCostPriceUsd),
+    };
+  }
+
   // Используется CartService/OrderService при добавлении в корзину/чекауте
   // "Купить в 1 клик" — актуальный самый дешёвый listing в наличии (ТЗ п.13.3).
+  //
+  // УВАГА: віддає ціну ПОСТАЧАЛЬНИКА (собівартість), не ту, що бачить
+  // покупець. Для всього, що стосується оплати, використовуй
+  // getPurchaseTerms() вище — див. коментар там.
   async getCheapestInStockListing(productId: string) {
     const listings = await this.prisma.client.productListing.findMany({
       where: { productId, sourceListing: { inStock: true } },
