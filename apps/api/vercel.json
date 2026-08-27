@@ -1,18 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-
-  "//1": "АУДИТ 27.08.2026. Тут не було виклику db-bootstrap. Явний buildCommand у vercel.json має пріоритет над скриптом vercel-build із package.json — тобто скрипт vercel-build, який САМЕ й запускає scripts/db-bootstrap.js, на Vercel не виконувався ніколи. Наслідок: жодна зміна schema.prisma не доїжджала до бойової бази. Найсвіжіший приклад — поля sourceUrl/mirroredAt/mirrorAttempts у ProductImage, додані під дзеркалення картинок. Перевірити руками: SELECT column_name FROM information_schema.columns WHERE table_name = 'ProductImage';",
   "buildCommand": "cd ../.. && npm install && npm run db:generate && npm run db:build && node scripts/db-bootstrap.js",
-
-  "//2": "includeFiles — щоб кириличний шрифт для PDF потрапив у бандл функції. InvoiceService читає його як path.join(__dirname, '../../assets/fonts/NotoSans-Regular.ttf'): шлях зібраний динамічно, тому трасування залежностей Vercel його не бачить і файл у бандл не кладе — кожна генерація рахунку, кошторису й бізнес-плану падала у проді.",
-  "//3": "maxDuration — власні тайм-бюджети джобів (200-260 с) досі спиралися на неявний дефолт платформи. Він зараз достатній (у логах є прогін на 3 хв 59 с), але не зафіксований у репозиторії й залежить від тарифу: одна зміна плану мовчки обрізала б усі крони.",
+  "installCommand": "echo skip",
   "functions": {
     "api/index.ts": {
       "maxDuration": 300,
       "includeFiles": "assets/**"
     }
   },
-
-  "installCommand": "echo skip",
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }
