@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { clientApi, getOrCreateSessionId } from '../lib/client-api';
 import type { CalculatorStepResult, ProjectGoal } from '../lib/api';
@@ -78,14 +78,23 @@ function UserBubble({ children, photoUrl }: { children: React.ReactNode; photoUr
   );
 }
 
-export function CalculatorQuiz({ locale }: { locale: string }) {
+// initialCity — місто, визначене за заголовками Vercel на сервері
+// (див. app/[locale]/calculator/page.tsx). Це ПІДКАЗКА, а не вибір: воно
+// лягає у поле пошуку, автодоповнювач по довіднику Нової Пошти працює як
+// раніше, і будь-яке редагування миттєво його перекриває.
+export function CalculatorQuiz({ locale, initialCity }: { locale: string; initialCity?: string | null }) {
   const router = useRouter();
 
   const [step, setStep] = useState(1);
   const [goals, setGoals] = useState<ProjectGoal[]>([]);
   const [me, setMe] = useState<Me | null>(null);
 
-  const [cityQuery, setCityQuery] = useState('');
+  // Стартуємо одразу з визначеного міста — тоді вже наявний ефект нижче
+  // сам зробить запит у довідник і покаже варіант для підтвердження.
+  // useState(initialCity ?? '') саме як ПОЧАТКОВЕ значення, не useEffect:
+  // інакше поле блимнуло б порожнім і перезаписало б те, що людина
+  // встигла набрати за цей час.
+  const [cityQuery, setCityQuery] = useState(initialCity ?? '');
   const [cityOptions, setCityOptions] = useState<NpCityOption[]>([]);
   const [selectedCity, setSelectedCity] = useState<NpCityOption | null>(null);
 
@@ -133,15 +142,42 @@ export function CalculatorQuiz({ locale }: { locale: string }) {
     clientApi<Me>('/auth/me').then(setMe).catch(() => setMe(null));
   }, []);
 
+  // Місто з заголовків підставлене в поле — але саме по собі це лише
+  // текст: далі все одно треба обрати варіант зі списку, бо для розрахунку
+  // потрібен ref міста в довіднику Нової Пошти (з нього беруться
+  // координати для PVGIS). Тому якщо довідник повернув ТОЧНИЙ збіг з
+  // визначеною назвою — обираємо його самі, щоб людина не тицяла в список
+  // заради того, що ми й так вгадали.
+  //
+  // Ref, а не прапорець у стані: спрацювати це має рівно один раз, на
+  // перший результат пошуку. Інакше, дійшовши до кроку 1 вдруге й почавши
+  // правити місто вручну, користувач отримав би автопідстановку назад —
+  // тобто ми б відбирали в нього те саме поле, яке обіцяли лишити
+  // редагованим.
+  const geoAutoPickDone = useRef(false);
+
   useEffect(() => {
     if (cityQuery.length < 2 || selectedCity) return;
     const timeout = setTimeout(() => {
       clientApi<NpCityOption[]>(`/nova-poshta/cities?q=${encodeURIComponent(cityQuery)}`)
-        .then(setCityOptions)
+        .then((options) => {
+          setCityOptions(options);
+
+          if (geoAutoPickDone.current || !initialCity) return;
+          geoAutoPickDone.current = true;
+          // Тільки точний збіг. Часткового достатньо для підказки в
+          // списку, але не для того, щоб вирішити за людину: "Березань"
+          // не має мовчки стати вибором того, хто в "Березному".
+          const exact = options.find((o) => o.name.trim().toLowerCase() === initialCity.trim().toLowerCase());
+          if (exact) {
+            setSelectedCity(exact);
+            setCityOptions([]);
+          }
+        })
         .catch(() => setCityOptions([]));
     }, 300);
     return () => clearTimeout(timeout);
-  }, [cityQuery, selectedCity]);
+  }, [cityQuery, selectedCity, initialCity]);
 
   function toggleGoal(key: string) {
     setSelectedGoals((prev) => (prev.includes(key) ? prev.filter((g) => g !== key) : [...prev, key]));

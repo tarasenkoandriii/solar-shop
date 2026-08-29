@@ -5,7 +5,10 @@ import type { Product } from '../lib/api';
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://solarshop.ua';
 
-const STATIC_PATHS = ['', '/solar-panels', '/batteries', '/controllers', '/contacts', '/payment', '/articles'];
+// '/payment' прибрано (27.08.2026): сторінку об'єднано з «Контактами», а
+// сам маршрут став 308-редиректом. Лишати редирект у карті сайту — пряма
+// помилка: пошуковик має отримувати кінцеву адресу, а не проміжну.
+const STATIC_PATHS = ['', '/solar-panels', '/batteries', '/controllers', '/contacts', '/articles'];
 
 // Динамическая sitemap (ТЗ п.15) — статические страницы + все опубликованные
 // товары и статьи. /cart, /checkout, /account — персонализированные,

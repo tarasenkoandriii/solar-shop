@@ -34,6 +34,17 @@ const nextConfig = {
   async rewrites() {
     return [{ source: '/api/:path*', destination: `${API_INTERNAL_URL}/:path*` }];
   },
+  // За запитом користувача (27.08.2026) сторінку «Оплата» об'єднано з
+  // «Контактами». Маршрут /:locale/payment лишається робочим і веде на
+  // /:locale/contacts — посилання з листів, закладок і пошукової видачі
+  // не ламаються.
+  //
+  // permanent: true (308), бо сторінки більше не буде ніколи: пошуковик
+  // має перенести на «Контакти» накопичену вагу, а тимчасовий редирект
+  // цього не робить.
+  async redirects() {
+    return [{ source: '/:locale/payment', destination: '/:locale/contacts', permanent: true }];
+  },
   async headers() {
     return [
       {

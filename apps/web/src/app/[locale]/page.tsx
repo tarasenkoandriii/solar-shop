@@ -4,7 +4,7 @@ import nextDynamic from 'next/dynamic';
 import { isLocale, type Locale } from '../../lib/i18n';
 import { getDictionary } from '../../lib/get-dictionary';
 import { apiGet } from '../../lib/api';
-import type { Manufacturer, Office } from '../../lib/api';
+import type { Manufacturer } from '../../lib/api';
 import { notFound } from 'next/navigation';
 import { SolarPanelIcon, BatteryIcon, ControllerIcon, GenericCategoryIcon } from '../../components/icons';
 import type { CompactGridPoint } from '../../components/SolarPotentialMap';
@@ -34,9 +34,8 @@ export default async function HomePage({ params }: { params: { locale: string } 
   const locale = params.locale as Locale;
   const dict = getDictionary(locale);
 
-  const [manufacturers, offices, solarMapPoints, allCategories] = await Promise.all([
+  const [manufacturers, solarMapPoints, allCategories] = await Promise.all([
     apiGet<Manufacturer[]>('/manufacturers', 3600).catch(() => [] as Manufacturer[]),
-    apiGet<Office[]>('/offices', 3600).catch(() => [] as Office[]),
     apiGet<CompactGridPoint[]>('/solar-map/grid', 86400).catch(() => [] as CompactGridPoint[]),
     apiGet<CategoryPublic[]>('/categories', 60).catch(() => [] as CategoryPublic[]),
   ]);
@@ -271,25 +270,14 @@ export default async function HomePage({ params }: { params: { locale: string } 
         </section>
       )}
 
-      {offices.length > 0 && (
-        <section className="relative mx-auto max-w-6xl px-4 pb-20">
-          <div className="mb-6 flex items-center justify-between">
-            <h2 className="text-2xl font-semibold text-leaf-900 [[data-theme=modern]_&]:font-display">{dict.offices.title}</h2>
-            <Link href={`/${locale}/contacts`} className="text-sm font-medium text-leaf-700 underline [[data-theme=modern]_&]:text-modern-accent">
-              {dict.offices.viewAll}
-            </Link>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {offices.map((office) => (
-              <div key={office.id} className="rounded-xl border border-leaf-800/10 p-4 text-sm">
-                <p className="font-semibold text-leaf-900">{office.city}</p>
-                <p className="mt-1 text-leaf-900/60">{office.address}</p>
-                <p className="mt-1 text-leaf-900/60">{office.phone}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {/* За запитом користувача (27.08.2026) блок «Наші офіси» з головної
+          прибрано. Він показував сітку на чотири колонки з таблиці Office,
+          а офіс насправді один — київський, і його адреса, карта й графік
+          тепер живуть на сторінці «Контакти». Дублювати один офіс на
+          головній сіткою, розрахованою на чотири, немає сенсу.
+
+          Разом із блоком прибрано й запит /offices із Promise.all вище —
+          сторінка більше не ходить в API за даними, яких не показує. */}
     </>
   );
 }

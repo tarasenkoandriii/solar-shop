@@ -203,7 +203,11 @@ export default function OfferPage({ params }: { params: { locale: string } }) {
           : locale === 'ru'
             ? 'структура на основе предыдущего проекта, реквизиты и детали требуют проверки юристом перед запуском.'
             : 'structure based on a previous project, details and business registration data require legal review before launch.'}{' '}
-        <Link href={`/${locale}/payment`} className="underline">
+        {/* Веде на /contacts, а не на /payment: сторінки об'єднано
+            (27.08.2026). Редирект спрацював би й зі старим посиланням, але
+            гнати відвідувача через зайвий перехід усередині власного сайту
+            ні до чого. */}
+        <Link href={`/${locale}/contacts`} className="underline">
           {locale === 'uk' ? 'Реквізити оплати' : locale === 'ru' ? 'Реквизиты оплаты' : 'Payment details'}
         </Link>
       </p>

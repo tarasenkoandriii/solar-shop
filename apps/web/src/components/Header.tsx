@@ -59,15 +59,24 @@ export async function Header({ locale }: { locale: Locale }) {
       .map((c) => ({ href: `/${locale}/catalog/${c.key}`, label: nameByLocale(c) })),
   ];
 
+  // За запитом користувача (27.08.2026): «Контакти» перенесено в головне
+  // меню, випадний список «Ще» прибрано.
+  //
+  // Передісторія за два кроки. Спершу «Оплату» об'єднали з «Контактами» —
+  // і в «Ще» лишився РІВНО ОДИН пункт. Випадний список заради одного
+  // пункту гірший за сам пункт: зайвий клік, і ще треба здогадатися, що
+  // контакти сховані саме за словом «Ще».
+  //
+  // Маршрут /payment не зник, а перенаправляє на /contacts
+  // (див. next.config.mjs). Ключі dict.nav.payment і dict.nav.more у
+  // словниках лишено: вони знадобляться, якщо сторінки колись розділять
+  // назад, а чистити три словники заради двох невикористаних ключів сенсу
+  // немає.
   const primaryNav = [
     { href: `/${locale}/calculator`, label: dict.nav.calculator },
     { href: `/${locale}/articles`, label: dict.nav.articles },
     { href: `/${locale}/financing`, label: dict.nav.financing },
-  ];
-
-  const secondaryNav = [
     { href: `/${locale}/contacts`, label: dict.nav.contacts },
-    { href: `/${locale}/payment`, label: dict.nav.payment },
   ];
 
   return (
@@ -103,7 +112,6 @@ export async function Header({ locale }: { locale: Locale }) {
                 {item.label}
               </Link>
             ))}
-            <MoreMenu label={dict.nav.more} items={secondaryNav} />
           </nav>
         </div>
 
@@ -140,7 +148,6 @@ export async function Header({ locale }: { locale: Locale }) {
             catalogLabel={dict.nav.catalogNav}
             catalogItems={catalogNav}
             primaryItems={primaryNav}
-            secondaryItems={secondaryNav}
           />
         </div>
       </div>

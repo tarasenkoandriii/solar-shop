@@ -112,18 +112,35 @@ async function main() {
   const pylontech = await findOrCreateManufacturer({ name: 'Pylontech', region: ManufacturerRegion.CHINA, country: 'China' });
   const victron = await findOrCreateManufacturer({ name: 'Victron Energy', region: ManufacturerRegion.EUROPE, country: 'Netherlands' });
 
-  console.log('Seeding offices...');
+  // За запитом користувача (27.08.2026) — офіс ОДИН, київський.
+  //
+  // Тут було чотири демо-записи з вигаданими адресами й телефонами:
+  // «вул. Хрещатик, 1 / +380 44 000 00 01», Харків, Одеса, Львів. Вони
+  // потрапляли на живий сайт — і на головну (блок «Наші офіси»), і на
+  // сторінку контактів. Обидва місця тепер їх не показують, але лишати
+  // фальшиві адреси в базі однаково не варто: таблицю редагує адмінка, і
+  // рано чи пізно вони б звідти виринули.
+  //
+  // Дані збігаються з реквізитами компанії (apps/web/src/lib/company.ts і
+  // apps/api/src/common/company.ts). Координати не вигадані — знайдені
+  // геокодером OpenStreetMap за цією адресою, відповідь містила будинок 12
+  // по Караїмському провулку з індексом 03110.
+  console.log('Seeding office...');
   if ((await prisma.office.count()) === 0) {
-    await prisma.office.createMany({
-      data: [
-        { city: 'Київ', address: 'вул. Хрещатик, 1', phone: '+380 44 000 00 01', email: 'kyiv@solarshop.ua', workHours: 'Пн-Пт 9:00-18:00', lat: 50.4501, lng: 30.5234, sortOrder: 0 },
-        { city: 'Харків', address: 'вул. Сумська, 10', phone: '+380 57 000 00 02', email: 'kharkiv@solarshop.ua', workHours: 'Пн-Пт 9:00-18:00', lat: 49.9935, lng: 36.2304, sortOrder: 1 },
-        { city: 'Одеса', address: 'вул. Дерибасівська, 5', phone: '+380 48 000 00 03', email: 'odesa@solarshop.ua', workHours: 'Пн-Пт 9:00-18:00', lat: 46.4825, lng: 30.7233, sortOrder: 2 },
-        { city: 'Львів', address: 'просп. Свободи, 15', phone: '+380 32 000 00 04', email: 'lviv@solarshop.ua', workHours: 'Пн-Пт 9:00-18:00', lat: 49.8397, lng: 24.0297, sortOrder: 3 },
-      ],
+    await prisma.office.create({
+      data: {
+        city: 'Київ',
+        address: 'пров. Караїмський, буд. 12',
+        phone: '+380 75 365 75 86',
+        email: 'heyslor@ukr.net',
+        workHours: 'Пн–Пт 9:00–18:00',
+        lat: 50.4168785,
+        lng: 30.4808074,
+        sortOrder: 0,
+      },
     });
   } else {
-    console.log('Офіси вже засіяні — пропускаю.');
+    console.log('Офіс уже засіяний — пропускаю.');
   }
 
   // Поставщики (ТЗ п.12) — топ-3 по приоритету парсинга, партнёрка не блокер (п.5.4)

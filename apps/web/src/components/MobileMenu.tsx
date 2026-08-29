@@ -28,7 +28,6 @@ export function MobileMenu({
   catalogLabel,
   catalogItems,
   primaryItems,
-  secondaryItems,
 }: {
   locale: Locale;
   dict: Dictionary;
@@ -36,7 +35,6 @@ export function MobileMenu({
   catalogLabel: string;
   catalogItems: NavItem[];
   primaryItems: NavItem[];
-  secondaryItems: NavItem[];
 }) {
   const [open, setOpen] = useState(false);
 
@@ -79,19 +77,6 @@ export function MobileMenu({
                 href={item.href}
                 onClick={() => setOpen(false)}
                 className="rounded-lg px-3 py-2.5 font-medium text-white hover:bg-white/5"
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-          <div className="mb-4 h-px bg-white/10" />
-          <nav className="mb-4 flex flex-col gap-1">
-            {secondaryItems.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={() => setOpen(false)}
-                className="rounded-lg px-3 py-2 text-sm text-white/70 hover:bg-white/5 hover:text-white"
               >
                 {item.label}
               </Link>
