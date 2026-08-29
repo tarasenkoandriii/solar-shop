@@ -6,7 +6,8 @@ import { getDictionary } from '../../lib/get-dictionary';
 import { apiGet } from '../../lib/api';
 import type { Manufacturer } from '../../lib/api';
 import { notFound } from 'next/navigation';
-import { SolarPanelIcon, BatteryIcon, ControllerIcon, GenericCategoryIcon } from '../../components/icons';
+import { categoryIconFor } from '../../components/icons';
+import { ManufacturerAvatar } from '../../components/ManufacturerAvatar';
 import { loadSolarGridPoints } from '../../lib/solar-grid';
 
 export const dynamic = 'force-dynamic';
@@ -50,14 +51,20 @@ export default async function HomePage({ params }: { params: { locale: string } 
   // SEO-friendly маршрути й іконки (не чіпались), БУДЬ-ЯКА інша
   // APPROVED категорія додається сюди динамічно з generic-іконкою,
   // лінкує на /catalog/[categoryKey].
+  //
+  // Іконки більше не перелічуються тут поштучно — беруться з
+  // categoryIconFor() (components/icons/index.ts). До цього три
+  // «відомі» категорії мали свої іконки прямо в цьому масиві, а всі
+  // інші отримували GenericCategoryIcon, тож Кабель, Конектори та
+  // Інвертори стояли в сітці трьома однаковими кубиками поспіль.
   const KNOWN_CATEGORY_KEYS = new Set(['SOLAR_PANEL', 'BATTERY', 'CONTROLLER']);
   const categories = [
-    { href: `/${locale}/solar-panels`, label: dict.nav.solarPanels, Icon: SolarPanelIcon },
-    { href: `/${locale}/batteries`, label: dict.nav.batteries, Icon: BatteryIcon },
-    { href: `/${locale}/controllers`, label: dict.nav.controllers, Icon: ControllerIcon },
+    { href: `/${locale}/solar-panels`, label: dict.nav.solarPanels, Icon: categoryIconFor('SOLAR_PANEL') },
+    { href: `/${locale}/batteries`, label: dict.nav.batteries, Icon: categoryIconFor('BATTERY') },
+    { href: `/${locale}/controllers`, label: dict.nav.controllers, Icon: categoryIconFor('CONTROLLER') },
     ...allCategories
       .filter((c) => !KNOWN_CATEGORY_KEYS.has(c.key))
-      .map((c) => ({ href: `/${locale}/catalog/${c.key}`, label: nameByLocale(c), Icon: GenericCategoryIcon })),
+      .map((c) => ({ href: `/${locale}/catalog/${c.key}`, label: nameByLocale(c), Icon: categoryIconFor(c.key) })),
   ];
 
   return (
@@ -262,8 +269,12 @@ export default async function HomePage({ params }: { params: { locale: string } 
           <h2 className="mb-6 text-2xl font-semibold text-leaf-900 [[data-theme=modern]_&]:font-display">{dict.manufacturers.title}</h2>
           <div className="flex flex-wrap gap-6">
             {manufacturers.map((m) => (
-              <div key={m.id} className="flex h-16 items-center rounded-xl border border-leaf-800/10 px-6 text-sm font-medium text-leaf-900/70">
-                {m.name}
+              <div
+                key={m.id}
+                className="flex h-16 items-center gap-3 rounded-xl border border-leaf-800/10 px-5 text-sm font-medium text-leaf-900/70"
+              >
+                <ManufacturerAvatar name={m.name} logoUrl={m.logoUrl} />
+                <span>{m.name}</span>
               </div>
             ))}
           </div>

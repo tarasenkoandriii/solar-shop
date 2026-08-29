@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { UserRole } from '@solar-shop/db';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -16,9 +17,41 @@ export class SolarMapController {
     private readonly embedViews: EmbedViewService,
   ) {}
 
+  // Єдиний публічний GET карти. Дьоргається з КОЖНОЇ сторінки, що
+  // показує карту, включно з /embed/solar-map, який за задумом
+  // вбудовується в чужі сайти (frame-ancestors *) — тобто обсяг
+  // запитів визначаємо не ми.
+  //
+  // ПОРОЖНЯ відповідь позначається no-store — і це головне, заради чого
+  // тут узагалі є заголовок. Уся ця правка почалась із того, що порожній
+  // масив застряг у кеші (Next.js Data Cache, 24 години) уже після того,
+  // як дані з'явились. Порожня сітка НЕ МАЄ осідати в жодному кеші на
+  // шляху: ані в Data Cache, ані в CDN, ані в браузері.
+  //
+  // Для НЕПОРОЖНЬОЇ відповіді заголовок свідомо не ставиться. Спокуса
+  // поставити `public, s-maxage=300`, щоб CDN гасив сплески, розбивається
+  // об CORS: обидва бутстрапи (main.ts і api/index.ts) піднімають
+  // enableCors({ credentials: true }) з origin=true/списком, а бібліотека
+  // cors у такій конфігурації ВІДДЗЕРКАЛЮЄ Origin запиту в
+  // Access-Control-Allow-Origin і додає Vary: Origin. Тобто тіло стає
+  // origin-залежним: або кеш чесно розкладає його по ключах на кожен
+  // Origin (і будь-хто обходить CDN одним заголовком — захист нульовий),
+  // або не розкладає (і чужий Origin з Allow-Credentials: true їде
+  // іншому клієнту). Спільний кеш для credentialed-CORS відповіді — не
+  // те, що варто вмикати заради економії кількох читань БД.
+  //
+  // Rate-limit тут теж свідомо НЕ ставиться. Ключ ліміту — IP, що дійшов
+  // до сокета API, а публічний трафік приходить сюди через rewrite
+  // /api/* у apps/web, тобто з egress-адреси самого веб-застосунку.
+  // Один ліміт на всіх означав би, що будь-хто вичерпує спільне вікно й
+  // гасить карту всьому сайту разом із SSR — рівно та аварія, від якої
+  // ліміт мав захищати. Дорогу частину (перебудову інтерполяції) вже
+  // обмежено інакше — MIN_REBUILD_INTERVAL_MS у SolarMapService.
   @Get('solar-map/grid')
-  getGrid() {
-    return this.solarMap.getGridPoints();
+  async getGrid(@Res({ passthrough: true }) res: Response) {
+    const points = await this.solarMap.getGridPoints();
+    if (points.length === 0) res.setHeader('Cache-Control', 'no-store');
+    return points;
   }
 
   // Публичный, но rate-limited — вызывается с любой страницы, встраивающей

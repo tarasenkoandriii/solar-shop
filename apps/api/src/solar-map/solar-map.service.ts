@@ -42,6 +42,14 @@ function getCountryBounds(countryCode: string): { latMin: number; latMax: number
 }
 const DEFAULT_INTERPOLATION_RESOLUTION = 60; // ~60 ячеек по большей стороне bounding box
 
+// Мінімальний проміжок між двома перебудовами інтерпольованої сітки —
+// див. getGridPoints(). 10 хвилин: карта клімату, застаріла на 10
+// хвилин, не відрізняється від актуальної жодним оком, а вартість
+// перебудови (≈1647 клітинок × ≈600 семплів + upsert ~41 КБ JSON на
+// однопотоковому event loop) варта того, щоб не платити її на кожен
+// запит головної сторінки.
+const MIN_REBUILD_INTERVAL_MS = 10 * 60 * 1000;
+
 // ТЗ п.34.2 — offline-этап: разовый прогон регулярной сетки точек по
 // Украине через PVGIS API (расширение уже спроектированной модели
 // SolarYieldEstimate, используется и калькулятором, и картой — общий кэш),
@@ -68,6 +76,9 @@ export class SolarMapService {
   // Перебудови інтерполяції, що зараз виконуються, за ключем
   // "countryCode:resolution" — див. getGridPoints().
   private readonly interpolationInFlight = new Map<string, Promise<CompactPoint[]>>();
+  // Коли востаннє перебудова впала, за тим самим ключем — щоб не
+  // повторювати дорогу спробу на кожен запит. Див. getGridPoints().
+  private readonly lastRebuildFailureAt = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -142,6 +153,39 @@ export class SolarMapService {
 
     if (cached && usableCells && cached.sourcePoints === currentSamples) return usableCells;
 
+    // Гальмо на частоту перебудов. SolarYieldEstimate — СПІЛЬНИЙ кеш:
+    // калькулятор пише туди координати кожного нового міста
+    // (CalculatorService.exportPackage → getAnnualKwhPerKwp(city.lat,
+    // city.lng) з дефолтними tilt 35 / azimuth 0), і кожне таке місто
+    // змінює currentSamples, тобто робить сітку "застарілою". Без
+    // гальма один експорт кошторису означав би повну перебудову на
+    // наступному ж запиті головної сторінки.
+    //
+    // Міста при цьому НЕ викидаються з пулу IDW — це справжні виміри
+    // PVGIS у тій самій системі координат (той самий нахил і азимут),
+    // вони роблять карту точнішою біля міст, а не гіршою. Проблема була
+    // тільки в частоті перебудов, її й лікуємо.
+    //
+    // Порожньої сітки гальмо НЕ стосується: краще перебудовувати щоразу,
+    // ніж показувати "дані не розраховані" ще 10 хвилин.
+    const key = `${countryCode}:${resolution}`;
+    if (cached && usableCells && Date.now() - cached.computedAt.getTime() < MIN_REBUILD_INTERVAL_MS) {
+      return usableCells;
+    }
+
+    // Те саме гальмо, але для НЕВДАЛИХ спроб. Без нього гальмо вище не
+    // працює саме тоді, коли воно найпотрібніше: якщо перебудова падає
+    // на upsert (таймаут пулера), computedAt не оновлюється, сітка
+    // назавжди лишається "застарілою" — і КОЖЕН запит наново проганяє
+    // ~1647 клітинок × ~600 семплів гаверсинусів, щоб потім викинути
+    // результат. Тобто в найдорожчому й найменш успішному стані
+    // навантаження було б максимальним. Пам'ять інстанса, не БД:
+    // невдача — це подія рантайму, її нема сенсу зберігати.
+    const lastFailedAt = this.lastRebuildFailureAt.get(key);
+    if (usableCells && lastFailedAt !== undefined && Date.now() - lastFailedAt < MIN_REBUILD_INTERVAL_MS) {
+      return usableCells;
+    }
+
     if (cached) {
       // Дві різні причини перебудови — і в лозі вони мають виглядати
       // по-різному: "не збігається кількість точок" і "збережена сітка
@@ -163,7 +207,6 @@ export class SolarMapService {
     // event loop плюс upsert ~41 КБ JSON. Дедуп у межах інстанса, не
     // глобальний (serverless), але саме сплеск на одному інстансі й
     // коштує дорого.
-    const key = `${countryCode}:${resolution}`;
     const inFlight = this.interpolationInFlight.get(key);
     if (inFlight) return inFlight;
 
@@ -176,8 +219,13 @@ export class SolarMapService {
         // застарілої карти — це рівно той симптом, заради якого вся ця
         // правка й робилась. Тому: є що віддати — віддаємо.
         this.logger.error(`Не вдалось перебудувати інтерпольовану сітку (${key}): ${err}`);
+        this.lastRebuildFailureAt.set(key, Date.now());
         if (usableCells) return usableCells;
         throw err;
+      })
+      .then((result) => {
+        this.lastRebuildFailureAt.delete(key);
+        return result;
       })
       .finally(() => this.interpolationInFlight.delete(key));
 
@@ -193,7 +241,13 @@ export class SolarMapService {
 
     await this.prisma.client.solarMapInterpolatedGrid.upsert({
       where: { countryCode_resolution: { countryCode, resolution } },
-      create: { countryCode, resolution, cellsJson: grid as unknown as object, sourcePoints: samples.length },
+      // computedAt явно в ОБОХ гілках. Раніше create покладався на
+      // @default(now()) — тобто годинник Postgres, — а update ставив
+      // new Date() з Node. Порівнюється воно потім із Date.now() у
+      // getGridPoints(): розбіжність годинників зсувала б 10-хвилинне
+      // вікно, а достатній зсув уперед на боці БД робив би різницю
+      // від'ємною й глушив перебудови зовсім.
+      create: { countryCode, resolution, cellsJson: grid as unknown as object, sourcePoints: samples.length, computedAt: new Date() },
       update: { cellsJson: grid as unknown as object, sourcePoints: samples.length, computedAt: new Date() },
     });
 
