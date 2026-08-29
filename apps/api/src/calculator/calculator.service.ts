@@ -9,6 +9,7 @@ import { InvoiceService } from '../invoice/invoice.service';
 import { EmailService } from '../email/email.service';
 import { NotifyService } from '../notify/notify.service';
 import { StartCalculatorDto, RefineCalculatorDto, UpdateSpecDto, SendPackageDto } from './dto/calculator.dto';
+import { roundToCents } from '../common/money';
 
 interface ResolvedSpecItem {
   productId: string;
@@ -275,10 +276,20 @@ export class CalculatorService {
     this.assertOwnership(estimate, userId, sessionId);
     if (estimate.status !== 'DRAFT') return estimate;
 
+    // Аудит 27.08.2026: тут був фолбек `: 41.5` із СЬОГОДНІШНЬОЮ датою в
+    // exchangeRateDate — тобто вигаданий курс фіксувався в кошторисі як
+    // справжній і ще й із виглядом свіжого. Саме це число потім іде в
+    // PDF-кошторис, у розрахунок окупності бізнес-плану й у кошик.
+    // Зафіксувати неправильний курс гірше, ніж не фіксувати нічого:
+    // другий випадок видно одразу, перший не видно ніколи.
     const rate = await this.prisma.client.exchangeRate.findFirst({ where: { currency: 'USD' }, orderBy: { rateDate: 'desc' } });
-    const exchangeRateUah = rate ? Number(rate.rateUah) : 41.5;
-    const exchangeRateDate = rate?.rateDate ?? new Date();
-    const totalUah = Number(estimate.totalUsd) * exchangeRateUah;
+    if (!rate) {
+      this.logger.error('Курс USD відсутній у базі — фіналізація кошторису неможлива. Запусти крон nbu_rate_sync (адмінка → Крони).');
+      throw new ServiceUnavailableException('Курс валют тимчасово недоступний. Спробуй, будь ласка, за кілька хвилин.');
+    }
+    const exchangeRateUah = Number(rate.rateUah);
+    const exchangeRateDate = rate.rateDate;
+    const totalUah = roundToCents(Number(estimate.totalUsd) * exchangeRateUah);
 
     return this.prisma.client.projectEstimate.update({
       where: { id: estimateId },

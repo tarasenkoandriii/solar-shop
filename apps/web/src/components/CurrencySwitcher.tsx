@@ -1,26 +1,23 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
+import { useCurrencyContext, type Currency } from '../lib/currency-context';
 
 // Переключатель USD/UAH (ТЗ п.24.3). Конвертация чисто отображенческая:
 // canonical priceUsd умножается на последний ExchangeRate.rateUah.
 // Выбор хранится в cookie для гостя.
-export type Currency = 'USD' | 'UAH';
+//
+// За запитом користувача (27.08.2026) валюта за замовчуванням — гривня.
+// Сам стан переїхав у lib/currency-context.tsx: і вибір, і курс тепер
+// приходять із сервера, бо інакше перший рендер ішов би з дефолтом і
+// давав спалах цін в іншій валюті. Причини докладно — у коментарі там.
+export type { Currency };
+
+// Реекспорт для сумісності: на нього ще посилаються PriceTag і сторінки.
+export { formatPrice } from '../lib/currency-context';
 
 export function useCurrency(): [Currency, (c: Currency) => void] {
-  const [currency, setCurrencyState] = useState<Currency>('USD');
-
-  useEffect(() => {
-    const match = document.cookie.match(/(?:^|; )currency=(USD|UAH)/);
-    if (match) setCurrencyState(match[1] as Currency);
-  }, []);
-
-  const setCurrency = (c: Currency) => {
-    setCurrencyState(c);
-    document.cookie = `currency=${c}; path=/; max-age=${60 * 60 * 24 * 365}`;
-  };
-
+  const { currency, setCurrency } = useCurrencyContext();
   return [currency, setCurrency];
 }
 
@@ -38,14 +35,19 @@ export function useCurrency(): [Currency, (c: Currency) => void] {
 const CATALOG_PATH_PATTERN = /^\/[a-z]{2}(\/(solar-panels|batteries|controllers|products(\/.*)?|cart)?)?\/?$/;
 
 export function CurrencySwitcher() {
-  const [currency, setCurrency] = useCurrency();
+  const { currency, setCurrency, rateUah } = useCurrencyContext();
   const pathname = usePathname();
 
   if (!CATALOG_PATH_PATTERN.test(pathname)) return null;
 
+  // Курс невідомий — перемикати нема на що: гривневі ціни все одно
+  // показати неможливо, і кнопка UAH просто нічого б не робила.
+  // Ховаємо весь перемикач, а не показуємо мертву кнопку.
+  if (rateUah === null) return null;
+
   return (
     <div className="flex overflow-hidden rounded-full border border-white/30 text-xs font-medium">
-      {(['USD', 'UAH'] as Currency[]).map((c) => (
+      {(['UAH', 'USD'] as Currency[]).map((c) => (
         <button
           key={c}
           onClick={() => setCurrency(c)}
@@ -53,17 +55,9 @@ export function CurrencySwitcher() {
             currency === c ? 'bg-sun-500 text-leaf-900' : 'text-white/80 hover:text-white'
           }`}
         >
-          {c}
+          {c === 'UAH' ? '₴' : '$'}
         </button>
       ))}
     </div>
   );
-}
-
-export function formatPrice(priceUsd: number | string, currency: Currency, rateUah: number): string {
-  const usd = typeof priceUsd === 'string' ? parseFloat(priceUsd) : priceUsd;
-  if (currency === 'UAH') {
-    return `${Math.round(usd * rateUah).toLocaleString('uk-UA')} ₴`;
-  }
-  return `$${usd.toLocaleString('en-US')}`;
 }

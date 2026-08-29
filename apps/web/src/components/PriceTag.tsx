@@ -1,8 +1,19 @@
 'use client';
 
-import { useCurrency, formatPrice } from './CurrencySwitcher';
+import { useCurrencyContext, formatPrice } from '../lib/currency-context';
 
-export function PriceTag({ priceUsd, rateUah }: { priceUsd: string | number; rateUah: number }) {
-  const [currency] = useCurrency();
-  return <span>{formatPrice(priceUsd, currency, rateUah)}</span>;
+// rateUah тепер НЕОБОВ'ЯЗКОВИЙ (27.08.2026). Раніше кожен викликач мусив
+// дістати курс сам — і робив це двома різними способами: каталог і картка
+// товару брали його на сервері, а кошик, кабінет і калькулятор —
+// клієнтським хуком із захардкодженою константою 41.5 та мовчазним
+// ковтанням помилки. Після переходу на гривню за замовчуванням другий
+// шлях означав би, що більшість цін на сайті рахується за вигаданим
+// курсом. Тепер джерело одне — контекст, заповнений на сервері.
+//
+// Проп лишено для тих місць, де курс уже отримано серверним запитом
+// поруч із самими даними: зайвий раз ходити в контекст там нема потреби,
+// а прибирати робочий проп заради одноманітності — зайвий ризик.
+export function PriceTag({ priceUsd, rateUah }: { priceUsd: string | number; rateUah?: number | null }) {
+  const ctx = useCurrencyContext();
+  return <span>{formatPrice(priceUsd, ctx.currency, rateUah ?? ctx.rateUah)}</span>;
 }

@@ -14,7 +14,9 @@ export function ProductCard({
   product: Product;
   locale: Locale;
   dict: Dictionary;
-  rateUah: number;
+  // null = курс невідомий; PriceTag у такому разі покаже долари, а не
+  // гривню за вигаданим курсом (див. lib/currency-context.tsx).
+  rateUah: number | null;
 }) {
   const cover = product.images[0]?.url;
 

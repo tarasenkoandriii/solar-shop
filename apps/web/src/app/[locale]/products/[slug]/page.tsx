@@ -10,6 +10,9 @@ import { ProductPurchaseActions } from '../../../../components/ProductPurchaseAc
 import { ProductReviewsSection } from '../../../../components/ProductReviewsSection';
 import { safeJsonLdStringify } from '../../../../lib/safe-json-ld';
 
+// Той самий патерн, що вже в articles/[slug]/page.tsx і robots.ts.
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://solarshop.ua';
+
 async function getProduct(slug: string) {
   try {
     return await apiGet<ProductDetail>(`/products/${slug}`, 60);
@@ -44,11 +47,17 @@ export default async function ProductPage({ params }: { params: { locale: string
 
   const [product, rate] = await Promise.all([
     getProduct(params.slug),
-    apiGet<ExchangeRate>('/currency/rate', 3600).catch(() => ({ currency: 'USD', rateUah: '41.5', rateDate: '' })),
+    // Аудит 27.08.2026: тут стояв .catch(() => ({ rateUah: '41.5' })) —
+    // мовчазна підміна курсу вигаданою константою. Тепер null, і
+    // formatPrice у такому разі показує долари замість гривні за
+    // неправильним курсом. Курс на весь layout уже завантажено
+    // ([locale]/layout.tsx), цей запит лишається заради кешу сторінки.
+    apiGet<ExchangeRate>('/currency/rate', 3600).catch(() => null),
   ]);
 
   if (!product) notFound();
-  const rateUah = parseFloat(rate.rateUah);
+  const parsedRate = rate ? parseFloat(rate.rateUah) : NaN;
+  const rateUah = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : null;
 
   const specsEntries = Object.entries(product.specs ?? {});
 
@@ -64,12 +73,21 @@ export default async function ProductPage({ params }: { params: { locale: string
     image: product.images.map((i) => i.url),
     description: product.shortDescription,
     brand: product.manufacturer ? { '@type': 'Brand', name: product.manufacturer.name } : undefined,
+    // Валюта структурованих даних мусить збігатися з тією, що людина
+    // бачить на сторінці. Після переходу на гривню за замовчуванням
+    // (27.08.2026) жорсткий 'USD' тут означав би розбіжність між
+    // розміткою й видимою ціною — Google це позначає як помилку
+    // структурованих даних і може зняти сніпет із ціною взагалі.
+    //
+    // Курс невідомий — лишаємо долари: краще коректна розмітка в іншій
+    // валюті, ніж гривнева ціна, порахована зі стелі.
     offers: product.cachedPriceUsd
       ? {
           '@type': 'Offer',
-          priceCurrency: 'USD',
-          price: product.cachedPriceUsd,
+          priceCurrency: rateUah === null ? 'USD' : 'UAH',
+          price: rateUah === null ? product.cachedPriceUsd : String(Math.round(parseFloat(String(product.cachedPriceUsd)) * rateUah)),
           availability: product.cachedInStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+          url: `${SITE_URL}/${locale}/products/${product.slug}`,
         }
       : undefined,
   };

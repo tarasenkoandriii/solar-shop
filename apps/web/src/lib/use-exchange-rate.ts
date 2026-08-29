@@ -1,18 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import type { ExchangeRate } from './api';
+import { useCurrencyContext } from './currency-context';
 
-export function useExchangeRate(): number {
-  const [rateUah, setRateUah] = useState(41.5);
-
-  useEffect(() => {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-    fetch(`${apiUrl}/currency/rate`)
-      .then((res) => res.json())
-      .then((data: ExchangeRate) => setRateUah(parseFloat(data.rateUah)))
-      .catch(() => {});
-  }, []);
-
-  return rateUah;
+// АУДИТ + запит користувача (27.08.2026). Було так:
+//
+//   const [rateUah, setRateUah] = useState(41.5);
+//   useEffect(() => { fetch(...).then(...).catch(() => {}); }, []);
+//
+// Тобто: перший рендер завжди за захардкодженим курсом 41.5, потім —
+// стрибок ціни, коли долетить відповідь; а якщо запит впав, курс лишався
+// вигаданим назавжди, і ніде жодного сліду. Поки гривню обирала меншість,
+// це був дрібний недолік. Щойно гривня стала валютою за замовчуванням, це
+// перетворилося б на "більшість цін на сайті — за курсом зі стелі".
+//
+// Тепер курс приходить із сервера один раз на весь layout. Хук лишено як
+// тонку обгортку, щоб не переписувати п'ять сторінок, які його вже
+// викликають, — але власного запиту й фолбеку в ньому більше немає.
+//
+// Повертає null, якщо курс невідомий. Викликачі передають це значення в
+// PriceTag/formatPrice, які в такому разі показують долари — чесне число
+// в іншій валюті замість неправдивого в гривні.
+export function useExchangeRate(): number | null {
+  return useCurrencyContext().rateUah;
 }

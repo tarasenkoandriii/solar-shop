@@ -79,10 +79,16 @@ export async function CatalogPage({
   const [data, manufacturers, rate] = await Promise.all([
     apiGet<ProductListResponse>(`/products?${qs.toString()}`, 30),
     apiGet<Manufacturer[]>('/manufacturers', 3600).catch(() => [] as Manufacturer[]),
-    apiGet<ExchangeRate>('/currency/rate', 3600).catch(() => ({ currency: 'USD', rateUah: '41.5', rateDate: '' })),
+    // Аудит 27.08.2026: тут стояв .catch(() => ({ rateUah: '41.5' })) —
+    // мовчазна підміна курсу вигаданою константою. Тепер null, і
+    // formatPrice у такому разі показує долари замість гривні за
+    // неправильним курсом. Курс на весь layout уже завантажено
+    // ([locale]/layout.tsx), цей запит лишається заради кешу сторінки.
+    apiGet<ExchangeRate>('/currency/rate', 3600).catch(() => null),
   ]);
 
-  const rateUah = parseFloat(rate.rateUah);
+  const parsedRate = rate ? parseFloat(rate.rateUah) : NaN;
+  const rateUah = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : null;
 
   function buildHref(page: number) {
     const params = new URLSearchParams(qs);

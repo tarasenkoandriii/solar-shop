@@ -10,12 +10,27 @@ export class CurrencyService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  // АУДИТ + запит користувача (27.08.2026). Було так:
+  //
+  //   return rate ?? { currency, rateUah: 41.5, rateDate: new Date(), ... };
+  //
+  // Тобто при порожній таблиці метод вигадував курс — і, що гірше,
+  // повертав його з СЬОГОДНІШНЬОЮ датою, тобто як абсолютно свіжий. Цей
+  // самий метод обслуговує публічний GET /currency/rate, з якого
+  // фронтенд бере курс для всіх цін.
+  //
+  // Поки гривню обирала меншість, це був прихований дефект. Після
+  // переходу на гривню за замовчуванням він став критичним: увесь
+  // каталог показував би ціни за вигаданим числом, і жоден захист на
+  // боці фронтенду не спрацював би — з погляду клієнта курс же прийшов.
+  //
+  // Тепер null. Викликач зобов'язаний вирішити, що робити: контролер
+  // віддає 503, фронтенд показує ціни в доларах (див. formatPrice).
   async getLatestRate(currency = 'USD') {
-    const rate = await this.prisma.client.exchangeRate.findFirst({
+    return this.prisma.client.exchangeRate.findFirst({
       where: { currency },
       orderBy: { rateDate: 'desc' },
     });
-    return rate ?? { currency, rateUah: 41.5, rateDate: new Date(), fetchedAt: new Date() };
   }
 
   // Дёргает публичный API НБУ, ключ не нужен (ТЗ п.24.2). НБУ — центробанк
@@ -51,18 +66,18 @@ export class CurrencyService {
   // потрібен новий зовнішній сервіс. Крос-курс CNY→USD = (CNY→UAH) /
   // (USD→UAH), обидва вже доступні через getLatestRate().
   //
-  // ⚠️ getLatestRate() повертає fallback-об'єкт (без `id`, rateUah:
-  // 41.5) якщо курс ще не синхронізовано — для USD цей фолбек
-  // прийнятний (41.5 — розумний дефолт USD/UAH, вже так у решті
-  // проєкту). Для CNY той самий фолбек був би АБСУРДНИМ (41.5 — курс
-  // ДОЛАРА, не юаня, дав би курс конвертації у ~6 разів завищеним) —
-  // тому перевірка на реальний запис (`'id' in`) ОБОВ'ЯЗКОВА саме тут,
-  // не косметична.
+  // Перевірка на наявність обох курсів тепер природна: getLatestRate()
+  // більше не вигадує фолбек і повертає null, якщо запису немає. Раніше
+  // тут стояла окрема перевірка `'id' in cnyRate` — саме тому, що для
+  // CNY підставлений курс ДОЛАРА (41.5) дав би конвертацію завищеною
+  // разів у шість. Тепер цей клас помилки неможливий у принципі, для
+  // будь-якої валюти.
   async convertCnyToUsd(amountCny: number): Promise<number | null> {
     const [cnyRate, usdRate] = await Promise.all([this.getLatestRate('CNY'), this.getLatestRate('USD')]);
-    if (!('id' in cnyRate)) return null; // курс CNY ще не синхронізовано — виклик має явно обробити null, не отримати абсурдне число
-    const usdRateUah = Number(usdRate.rateUah); // fallback тут безпечний, той самий дефолт, що вже в решті проєкту
+    if (!cnyRate || !usdRate) return null;
+    const usdRateUah = Number(usdRate.rateUah);
     const cnyRateUah = Number(cnyRate.rateUah);
+    if (!Number.isFinite(usdRateUah) || usdRateUah <= 0) return null;
     return Math.round(((amountCny * cnyRateUah) / usdRateUah) * 100) / 100;
   }
 }
