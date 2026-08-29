@@ -45,11 +45,28 @@ export default function ContactsPage({ params }: { params: { locale: string } })
   const steps = [dict.payment.process1, dict.payment.process2, dict.payment.process3, dict.payment.process4, dict.payment.process5];
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-10">
+    // За запитом користувача (27.08.2026) — на десктопі дві колонки:
+    // ліворуч контакти, праворуч оплата. Контейнер розширено з max-w-3xl
+    // до max-w-6xl: у три чверті екрана дві колонки тіснились би, а карта
+    // ліворуч стала б смужкою.
+    //
+    // lg:, а не md: — поріг узято вище звичайного свідомо. На планшеті
+    // (768px) дві колонки дали б приблизно по 340px кожна, і таблиця
+    // реквізитів із довгою юридичною адресою почала б переносити рядки
+    // посеред слів. До 1024px лишається одна колонка.
+    <div className="mx-auto max-w-6xl px-4 py-10">
       <h1 className="mb-8 text-2xl font-semibold text-leaf-900">{dict.contacts.title}</h1>
 
+      {/* items-start — щоб коротша колонка не розтягувалась по висоті
+          сусідньої; інакше карта ліворуч поїхала б униз услід за довшим
+          блоком оплати. */}
+      <div className="grid gap-8 lg:grid-cols-2 lg:items-start">
+
+      {/* ================= ЛІВОРУЧ: контакти ================= */}
+      <div className="flex flex-col gap-6">
+
       {/* ---- Офіс ---- */}
-      <div className="mb-6 rounded-2xl border border-leaf-800/10 p-5">
+      <div className="rounded-2xl border border-leaf-800/10 p-5">
         <h2 className="font-semibold text-leaf-900">{COMPANY.legalName}</h2>
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
           <dt className="text-leaf-900/50">Адреса</dt>
@@ -71,11 +88,18 @@ export default function ContactsPage({ params }: { params: { locale: string } })
         </dl>
       </div>
 
-      <div className="mb-10">
-        <OfficeMap title={`${dict.contacts.title} — ${COMPANY.address}`} />
+      <OfficeMap title={`${dict.contacts.title} — ${COMPANY.address}`} />
+
+      {/* ---- Форма ---- */}
+      <div className="rounded-2xl border border-leaf-800/10 p-6">
+        <h2 className="mb-4 text-lg font-semibold text-leaf-900">{dict.contacts.formTitle}</h2>
+        <LeadForm dict={dict} />
       </div>
 
-      {/* ---- Оплата (колишня окрема сторінка) ---- */}
+      </div>
+      {/* ================= ПРАВОРУЧ: оплата ================= */}
+      <div className="flex flex-col">
+
       <h2 className="mb-2 text-xl font-semibold text-leaf-900">{dict.payment.title}</h2>
       <p className="mb-1 text-lg font-medium italic text-leaf-800">«{dict.payment.slogan}»</p>
       <p className="mb-6 text-sm text-leaf-900/60">{dict.payment.explanation}</p>
@@ -97,7 +121,7 @@ export default function ContactsPage({ params }: { params: { locale: string } })
       </ol>
 
       <h3 className="mb-3 font-semibold text-leaf-900">{dict.payment.detailsTitle}</h3>
-      <dl className="mb-10 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-2xl border border-leaf-800/10 p-5 text-sm">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-2xl border border-leaf-800/10 p-5 text-sm">
         {PAYMENT_DETAILS.map((row) => (
           <Fragment key={row.label}>
             <dt className="text-leaf-900/50">{row.label}</dt>
@@ -106,10 +130,7 @@ export default function ContactsPage({ params }: { params: { locale: string } })
         ))}
       </dl>
 
-      {/* ---- Форма ---- */}
-      <div className="rounded-2xl border border-leaf-800/10 p-6">
-        <h2 className="mb-4 text-lg font-semibold text-leaf-900">{dict.contacts.formTitle}</h2>
-        <LeadForm dict={dict} />
+      </div>
       </div>
     </div>
   );
