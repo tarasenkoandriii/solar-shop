@@ -1,43 +1,7 @@
-import { PrismaClient, ManufacturerRegion, MatchType } from '@prisma/client';
-import { computeProductPricing } from '../src/pricing';
+import { PrismaClient, ManufacturerRegion } from '@prisma/client';
 import { buildSchemaTemplateSvg } from '../src/schema-diagram-templates';
 
 const prisma = new PrismaClient();
-
-// За запитом користувача (категорії тепер таблиця, не жорсткий enum) —
-// той самий Category.articleNumberPrefix, що вже застосований у
-// products.service.ts/matching.service.ts, замість захардкодженого
-// Record<ProductCategory,string>. Категорії вже засіяні (Seeding
-// categories... вище) до виклику цієї функції — findFirst безпечний.
-async function nextArticleNumber(category: string): Promise<string> {
-  const seq = await prisma.articleNumberSequence.upsert({
-    where: { category },
-    create: { category, lastSeq: 1 },
-    update: { lastSeq: { increment: 1 } },
-  });
-  const categoryRow = await prisma.category.findUnique({ where: { key: category } });
-  const prefix = categoryRow?.articleNumberPrefix ?? 'XX';
-  return `${prefix}-${String(seq.lastSeq).padStart(6, '0')}`;
-}
-
-function slugify(name: string, suffix: string): string {
-  return (
-    name
-      .toLowerCase()
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/(^-|-$)/g, '') +
-    '-' +
-    suffix.toLowerCase()
-  );
-}
-
-const placeholderImages = [
-  'https://placehold.co/800x600/1a2e1a/ffffff?text=Product+1',
-  'https://placehold.co/800x600/1a2e1a/ffffff?text=Product+2',
-  'https://placehold.co/800x600/1a2e1a/ffffff?text=Product+3',
-];
 
 async function main() {
   // Знайдено 18.08.2026: попередня версія мала ОДИН глобальний guard на
@@ -107,10 +71,10 @@ async function main() {
   });
 
   console.log('Seeding manufacturers...');
-  const solarEdge = await findOrCreateManufacturer({ name: 'SolarEdge', region: ManufacturerRegion.EUROPE, country: 'Israel/Europe' });
-  const longi = await findOrCreateManufacturer({ name: 'Longi Solar', region: ManufacturerRegion.CHINA, country: 'China' });
-  const pylontech = await findOrCreateManufacturer({ name: 'Pylontech', region: ManufacturerRegion.CHINA, country: 'China' });
-  const victron = await findOrCreateManufacturer({ name: 'Victron Energy', region: ManufacturerRegion.EUROPE, country: 'Netherlands' });
+  await findOrCreateManufacturer({ name: 'SolarEdge', region: ManufacturerRegion.EUROPE, country: 'Israel/Europe' });
+  await findOrCreateManufacturer({ name: 'Longi Solar', region: ManufacturerRegion.CHINA, country: 'China' });
+  await findOrCreateManufacturer({ name: 'Pylontech', region: ManufacturerRegion.CHINA, country: 'China' });
+  await findOrCreateManufacturer({ name: 'Victron Energy', region: ManufacturerRegion.EUROPE, country: 'Netherlands' });
 
   // За запитом користувача (27.08.2026) — офіс ОДИН, київський.
   //
@@ -145,11 +109,10 @@ async function main() {
 
   // Поставщики (ТЗ п.12) — топ-3 по приоритету парсинга, партнёрка не блокер (п.5.4)
   console.log('Seeding vendors...');
-  // Реальні записи Vendor створюються (для майбутнього реального парсера,
-  // що резолвитиме постачальника по імені при живому запуску), але
-  // повертані об'єкти більше НЕ використовуються нижче для demo-листингів
-  // — усі demo-ціни тепер атрибутовані seedVendor (детальніше нижче), не
-  // замасковані під ці реальні бренди.
+  // Реальні записи Vendor — щоб парсер при живому запуску зарезолвив
+  // постачальника по імені, а не створював дубль. Самі листинги сюди не
+  // засіваються: демо-товари прибрано (27.08.2026), каталог наповнює
+  // парсер.
   await findOrCreateVendor({
     name: 'sunshop.com.ua',
     website: 'https://sunshop.com.ua',
@@ -175,213 +138,60 @@ async function main() {
     contractStatus: 'NOT_CONTACTED',
   });
 
-  // За запитом користувача — seed-дані як окремий "постачальник", не
-  // замаскований під один із реальних (sunshop/akumulyator/voltmarket/
-  // vencon вище). excludeFromMatching: true — SiblingsService.
-  // getCandidates() фільтрує його листинги з черги модерації (навіть
-  // попри те, що вони й так одразу матчаться нижче через MANUAL, це
-  // явний, а не випадковий захист на майбутнє).
-  const seedVendor = await findOrCreateVendor({
-    name: 'Демо-дані (seed)',
-    website: 'internal-seed.local',
-    warehouseCities: ['Україна'],
-    contractStatus: 'NOT_CONTACTED',
-    excludeFromMatching: true,
-  });
+  // Постачальника «Демо-дані (seed)» більше не створюємо: він існував
+  // рівно для того, щоб демо-листинги не маскувалися під реальні бренди,
+  // а демо-товарів більше немає. Механізм excludeFromMatching лишається в
+  // коді (SiblingsService.getCandidates, ProductsService.isSeedData) — він
+  // не залежав від цього запису.
+  //
+  // На вже наповнених базах сам рядок Vendor нікуди не подінеться: сид
+  // нічого не видаляє. Якщо він там є і заважає — прибрати вручну разом
+  // із його листингами.
 
-  console.log('Seeding products + sibling listings...');
-  const RATE_UAH = 41.5; // курс — потрібен і тут, і пізніше для ExchangeRate, тому оголошено ДО if/else, не всередині (інакше недоступний за межами блоку)
-  if ((await prisma.product.count()) > 0) {
-    console.log('Товари вже засіяні — пропускаю (без перевірки кожного окремо, вся секція атомарна за задумом).');
-  } else {
+  // За запитом користувача (27.08.2026) демо-товари з сида ПРИБРАНО.
+  //
+  // Тут була секція на 200+ рядків: 20 вигаданих товарів із цінами,
+  // картинками-заглушками, чотирма «постачальниками», що насправді всі
+  // вказували на один seedVendor, і ручним перерахунком кешу цін. Сенс
+  // вона мала рівно доти, доки каталог наповнювався вручну; зараз товари
+  // приходять із парсера, і демо-дані лише засмічували б живий каталог.
+  //
+  // Категорії, виробники, країни та решта довідників лишаються — без них
+  // парсеру нема куди складати знайдене (Category.articleNumberPrefix
+  // потрібен для генерації артикулів, Manufacturer — для фільтра в
+  // каталозі).
+  //
+  // RATE_UAH лишено: він потрібен нижче для засіву ExchangeRate.
+  const RATE_UAH = 41.5;
 
-  type Seed = {
-    name: string;
-    manufacturerId: string;
-    specs: Record<string, unknown>;
-    isNew?: boolean;
-    // цены у разных поставщиков (UAH) — для демонстрации siblings/promo;
-    // второй листинг опционален (не у всех товаров есть 2 sibling)
-    listingsUah: { vendor: 'sunshop' | 'akumulyator' | 'voltmarket' | 'vencon'; priceUah: number; inStock?: boolean }[];
-  };
-
-  const panels: Seed[] = [
-    { name: 'Longi LR5-54HTH 410W', manufacturerId: longi.id, specs: { powerW: 410, type: 'MONO' }, listingsUah: [{ vendor: 'sunshop', priceUah: 3695 }, { vendor: 'voltmarket', priceUah: 3450 }, { vendor: 'vencon', priceUah: 3599 }] },
-    { name: 'Longi LR5-72HTH 550W', manufacturerId: longi.id, specs: { powerW: 550, type: 'MONO' }, isNew: true, listingsUah: [{ vendor: 'sunshop', priceUah: 4897 }] },
-    { name: 'Longi LR4-60HPH 365W', manufacturerId: longi.id, specs: { powerW: 365, type: 'MONO' }, listingsUah: [{ vendor: 'sunshop', priceUah: 3154 }, { vendor: 'akumulyator', priceUah: 3050 }] },
-    { name: 'SolarEdge SE440-P 440W', manufacturerId: solarEdge.id, specs: { powerW: 440, type: 'MONO' }, listingsUah: [{ vendor: 'sunshop', priceUah: 5478 }] },
-    { name: 'SolarEdge Flex 200W', manufacturerId: solarEdge.id, specs: { powerW: 200, type: 'FLEXIBLE' }, isNew: true, listingsUah: [{ vendor: 'voltmarket', priceUah: 8715 }] },
-    { name: 'Victron BlueSolar Poly 175W', manufacturerId: victron.id, specs: { powerW: 175, type: 'POLY' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 3943 }] },
-    { name: 'Victron BlueSolar Poly 115W', manufacturerId: victron.id, specs: { powerW: 115, type: 'POLY' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 2822 }, { vendor: 'sunshop', priceUah: 2350 }] },
-  ];
-
-  const batteries: Seed[] = [
-    { name: 'Pylontech US3000C 3.5kWh', manufacturerId: pylontech.id, specs: { capacityAh: 74, capacityKwh: 3.5, chemistry: 'LIFEPO4' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 32370 }, { vendor: 'sunshop', priceUah: 30500 }, { vendor: 'vencon', priceUah: 31200 }] },
-    { name: 'Pylontech US5000 4.8kWh', manufacturerId: pylontech.id, specs: { capacityAh: 100, capacityKwh: 4.8, chemistry: 'LIFEPO4' }, isNew: true, listingsUah: [{ vendor: 'akumulyator', priceUah: 43575 }] },
-    { name: 'Pylontech Force H2 7.1kWh', manufacturerId: pylontech.id, specs: { capacityAh: 148, capacityKwh: 7.1, chemistry: 'LIFEPO4' }, listingsUah: [{ vendor: 'sunshop', priceUah: 63910 }] },
-    { name: 'Victron Lithium Smart 200Ah', manufacturerId: victron.id, specs: { capacityAh: 200, chemistry: 'LIFEPO4' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 53535 }] },
-    { name: 'Victron AGM Deep Cycle 220Ah', manufacturerId: victron.id, specs: { capacityAh: 220, chemistry: 'AGM' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 17015 }, { vendor: 'voltmarket', priceUah: 14800 }] },
-    { name: 'Victron Gel Deep Cycle 165Ah', manufacturerId: victron.id, specs: { capacityAh: 165, chemistry: 'GEL' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 13280 }] },
-  ];
-
-  const controllers: Seed[] = [
-    { name: 'Victron SmartSolar MPPT 100/30', manufacturerId: victron.id, specs: { controllerType: 'MPPT', maxCurrentA: 30 }, listingsUah: [{ vendor: 'sunshop', priceUah: 6848 }] },
-    { name: 'Victron SmartSolar MPPT 150/60', manufacturerId: victron.id, specs: { controllerType: 'MPPT', maxCurrentA: 60 }, isNew: true, listingsUah: [{ vendor: 'sunshop', priceUah: 14110 }, { vendor: 'voltmarket', priceUah: 13200 }] },
-    { name: 'Victron BlueSolar PWM 20A', manufacturerId: victron.id, specs: { controllerType: 'PWM', maxCurrentA: 20 }, listingsUah: [{ vendor: 'voltmarket', priceUah: 1743 }] },
-    { name: 'SolarEdge Home Charge Controller 45A', manufacturerId: solarEdge.id, specs: { controllerType: 'MPPT', maxCurrentA: 45 }, listingsUah: [{ vendor: 'sunshop', priceUah: 9130 }] },
-    { name: 'SolarEdge Compact PWM 10A', manufacturerId: solarEdge.id, specs: { controllerType: 'PWM', maxCurrentA: 10 }, listingsUah: [{ vendor: 'sunshop', priceUah: 1162 }, { vendor: 'akumulyator', priceUah: 980 }] },
-    { name: 'SolarEdge Pro MPPT 80A', manufacturerId: solarEdge.id, specs: { controllerType: 'MPPT', maxCurrentA: 80 }, isNew: true, listingsUah: [{ vendor: 'sunshop', priceUah: 17015 }] },
-  ];
-
-  // За прямим запитом користувача ("явно упущен раздел кабели и
-  // соединители") — демо-позиції для нового розрахунку кабельної
-  // траси (calculator.service.ts). priceUah тут — ЦІНА ЗА 1 МЕТР
-  // (не за одиницю товару, як для решти категорій) — задокументовано
-  // в Category-коментарі вище й у самій логіці резолвінгу. Ряд
-  // перерізів (1.5/2.5/4/6/10 мм²) — стандартний ряд за ПУЕ, не
-  // довільний набір. DC-кабель (сонячний, для комутації панелей) і
-  // AC-кабель (силовий, "кабель зниження" до споживача) — окремі
-  // товари, бо мають різне призначення й ціну.
-  const cables: Seed[] = [
-    { name: 'Сонячний DC-кабель 4мм² (чорний, 1 метр)', manufacturerId: victron.id, specs: { crossSectionMm2: 4, cableType: 'DC_SOLAR' }, listingsUah: [{ vendor: 'sunshop', priceUah: 22 }, { vendor: 'voltmarket', priceUah: 19 }] },
-    { name: 'Сонячний DC-кабель 6мм² (чорний, 1 метр)', manufacturerId: victron.id, specs: { crossSectionMm2: 6, cableType: 'DC_SOLAR' }, listingsUah: [{ vendor: 'sunshop', priceUah: 31 }] },
-    { name: 'ВВГнг-LS 3×2.5мм² (силовий, 1 метр)', manufacturerId: solarEdge.id, specs: { crossSectionMm2: 2.5, cableType: 'AC_POWER' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 52 }, { vendor: 'vencon', priceUah: 48 }] },
-    { name: 'ВВГнг-LS 3×4мм² (силовий, 1 метр)', manufacturerId: solarEdge.id, specs: { crossSectionMm2: 4, cableType: 'AC_POWER' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 74 }] },
-    { name: 'ВВГнг-LS 3×6мм² (силовий, 1 метр)', manufacturerId: solarEdge.id, specs: { crossSectionMm2: 6, cableType: 'AC_POWER' }, isNew: true, listingsUah: [{ vendor: 'akumulyator', priceUah: 112 }, { vendor: 'sunshop', priceUah: 105 }] },
-    { name: 'ВВГнг-LS 3×10мм² (силовий, 1 метр)', manufacturerId: solarEdge.id, specs: { crossSectionMm2: 10, cableType: 'AC_POWER' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 178 }] },
-  ];
-
-  // Ціна — за 1 ПАРУ (тато+мама), не за штуку. quantity в резолвінгу
-  // рахується як кількість строк панелей, не кількість самих панелей.
-  const connectors: Seed[] = [
-    { name: 'MC4 конектор, пара (тато+мама)', manufacturerId: victron.id, specs: { connectorType: 'MC4' }, listingsUah: [{ vendor: 'sunshop', priceUah: 65 }, { vendor: 'voltmarket', priceUah: 58 }] },
-    { name: 'MC4 подовжувач 1.5м, пара кабелів з конекторами', manufacturerId: victron.id, specs: { connectorType: 'MC4_EXTENSION' }, isNew: true, listingsUah: [{ vendor: 'sunshop', priceUah: 245 }] },
-  ];
-
-  // За прямим запитом користувача — "исправь добавлением категории".
-  // Реальні моделі Victron Phoenix/MultiPlus (той самий виробник, що
-  // вже панелі/акумулятори в seed — Victron реально виробляє
-  // інвертори, не вигаданий асортимент). outputPowerW — безперервна
-  // вихідна потужність, не пікова (та сама консервативна логіка, що
-  // вже для перерізу кабелю за ампасіті).
-  const inverters: Seed[] = [
-    { name: 'Victron Phoenix Inverter 12/500', manufacturerId: victron.id, specs: { outputPowerW: 500, inverterType: 'PURE_SINE' }, listingsUah: [{ vendor: 'sunshop', priceUah: 9850 }, { vendor: 'voltmarket', priceUah: 9200 }] },
-    { name: 'Victron Phoenix Inverter 12/800', manufacturerId: victron.id, specs: { outputPowerW: 800, inverterType: 'PURE_SINE' }, listingsUah: [{ vendor: 'sunshop', priceUah: 13400 }] },
-    { name: 'Victron Phoenix Inverter 24/1200', manufacturerId: victron.id, specs: { outputPowerW: 1200, inverterType: 'PURE_SINE' }, listingsUah: [{ vendor: 'akumulyator', priceUah: 18900 }, { vendor: 'sunshop', priceUah: 17650 }] },
-    { name: 'Victron MultiPlus 24/2000', manufacturerId: victron.id, specs: { outputPowerW: 2000, inverterType: 'PURE_SINE' }, isNew: true, listingsUah: [{ vendor: 'akumulyator', priceUah: 32500 }] },
-    { name: 'Victron MultiPlus 48/3000', manufacturerId: victron.id, specs: { outputPowerW: 3000, inverterType: 'PURE_SINE' }, listingsUah: [{ vendor: 'vencon', priceUah: 46800 }, { vendor: 'akumulyator', priceUah: 44200 }] },
-  ];
-
-  // Усі чотири "бренди" тут — те саме демо-джерело seedVendor, не окремі
-  // реальні постачальники (навмисно, за запитом користувача, детальніше
-  // вище) — ключі лишені для різноманітності sourceSku/sourceUrl у
-  // демо-даних (виглядає як кілька цінових пропозицій), не для
-  // прив'язки до різних реальних Vendor-рядків.
-  const vendorById = { sunshop: seedVendor, akumulyator: seedVendor, voltmarket: seedVendor, vencon: seedVendor };
-  const allByCategory: [string, Seed[]][] = [
-    ['SOLAR_PANEL', panels],
-    ['BATTERY', batteries],
-    ['CONTROLLER', controllers],
-    ['CABLE', cables],
-    ['CONNECTOR', connectors],
-    ['INVERTER', inverters],
-  ];
-
-  for (const [category, items] of allByCategory) {
-    for (const item of items) {
-      // За прямим запитом користувача ("почему не показывает дефолтный
-      // манифест который должен быть всегда") — знайдено РЕАЛЬНУ
-      // причину: db-bootstrap.js запускає `prisma db seed` на КОЖЕН
-      // старт контейнера (не лише перший), а весь цей блок створення
-      // товарів раніше НЕ мав жодного захисту від повторного запуску —
-      // при другому й наступних запусках `product.create()` падав на
-      // порушенні унікальності `slug`, і ВЕСЬ КОД ПІСЛЯ цієї точки у
-      // файлі (включно з universal-manifest блоком значно нижче) НІКОЛИ
-      // реально не виконувався. Перевірка по імені+виробнику — той
-      // самий "натуральний ключ" демо-даних, ДО виклику
-      // nextArticleNumber() — щоб не витрачати позиції нумерації
-      // марно на товар, що однаково буде пропущено.
-      const existingProduct = await prisma.product.findFirst({ where: { name: item.name, manufacturerId: item.manufacturerId } });
-      if (existingProduct) continue;
-
-      const articleNumber = await nextArticleNumber(category);
-      const slug = slugify(item.name, articleNumber);
-
-      const product = await prisma.product.create({
-        data: {
-          slug,
-          articleNumber,
-          category,
-          name: item.name,
-          manufacturerId: item.manufacturerId,
-          shortDescription: `${item.name} — надійне обладнання для сонячної енергетики.`,
-          description: `## ${item.name}\n\nЯкісне обладнання для домашніх та комерційних сонячних систем. Детальні характеристики наведені в таблиці нижче. Підходить для монтажу як в приватних будинках, так і на комерційних об'єктах.\n\n**Гарантія**: уточнюйте у менеджера.`,
-          specs: item.specs,
-          status: 'PUBLISHED',
-          images: {
-            create: placeholderImages.map((url, i) => ({ url, sortOrder: i })),
-          },
-        },
-      });
-
-      // Siblings: seed-время эмулирует то, что в реальности сделал бы
-      // matching engine (ТЗ п.13.2) — здесь всё заведомо "один и тот же
-      // товар", поэтому matchType: MANUAL, без confidence.
-      const createdListings: { priceUsd: number; inStock: boolean; vendorWarehouseCities: string[] }[] = [];
-      for (const l of item.listingsUah) {
-        const vendor = vendorById[l.vendor];
-        const priceUsd = Math.round((l.priceUah / RATE_UAH) * 100) / 100;
-        const inStock = l.inStock ?? true;
-        const listing = await prisma.sourceListing.create({
-          data: {
-            vendorId: vendor.id,
-            sourceUrl: `https://${vendor.website.replace('https://', '')}/product/${slug}`,
-            sourceSku: `${l.vendor.toUpperCase()}-${articleNumber}`,
-            rawTitle: item.name,
-            rawCategory: category,
-            rawPrice: l.priceUah,
-            rawCurrency: 'UAH',
-            priceUsd,
-            priceRateDate: new Date(new Date().toDateString()),
-            inStock,
-            images: placeholderImages,
-          },
-        });
-        await prisma.productListing.create({
-          data: {
-            productId: product.id,
-            sourceListingId: listing.id,
-            matchType: MatchType.MANUAL,
-            isPrimary: item.listingsUah[0] === l,
-          },
-        });
-        createdListings.push({ priceUsd, inStock, vendorWarehouseCities: vendor.warehouseCities });
-      }
-
-      const pricing = computeProductPricing(createdListings, 5);
-      await prisma.product.update({
-        where: { id: product.id },
-        data: {
-          cachedCostPriceUsd: pricing.cachedCostPriceUsd,
-          cachedPriceUsd: pricing.cachedPriceUsd,
-          cachedInStock: pricing.cachedInStock,
-          cachedWarehouseCities: pricing.cachedWarehouseCities,
-          cachedIsPromo: pricing.cachedIsPromo,
-          cachedDiscountPercent: pricing.cachedDiscountPercent,
-          cachedIsNew: item.isNew ?? false,
-          pricingUpdatedAt: new Date(),
-        },
-      });
-    }
-  }
-  } // кінець `else` для секції товарів (guard на початку блоку)
 
   console.log('Seeding promo settings (default threshold)...');
-  await prisma.promoSettings.upsert({
-    where: { category: null },
-    create: { category: null, thresholdPercent: 5 },
-    update: {},
-  });
+  // АУДИТ 27.08.2026 (знайдено живим деплоєм, після того як db-bootstrap
+  // нарешті почав виконуватись на Vercel).
+  //
+  // Було: upsert({ where: { category: null } }) — і Prisma відмовляла з
+  // "Argument `category` must not be null". Причина не в Prisma, а в SQL:
+  // `category` — nullable, а @@unique([category]) на nullable-колонці не
+  // ідентифікує рядок однозначно (NULL != NULL), тож null не можна
+  // використати як unique-lookup.
+  //
+  // Найприкріше, що ЦЕЙ САМИЙ випадок у проєкті вже був вирішений і
+  // задокументований — у PromoService.update() (apps/api/src/promo/
+  // promo.service.ts) стоїть рівно та сама find-or-create логіка з тим
+  // самим поясненням. Сид просто ніколи не доходив до цього рядка
+  // успішно, бо взагалі не виконувався на Vercel, а локально помилку
+  // ковтав db-bootstrap. Той самий клас помилки описаний і в
+  // CartService.mergeGuestCartIntoUser — теж через nullable-поле у
+  // складеному унікальному ключі.
+  //
+  // Ціна цього рядка була висока: сид падав тут і НЕ доходив до всього,
+  // що нижче — тарифів лояльності, курсу валют, цілей проєктів, шаблонів
+  // схем, координат НП, програм фінансування. А без курсу валют
+  // OrdersService тепер (свідомо) відмовляє в оформленні замовлення.
+  const existingPromo = await prisma.promoSettings.findFirst({ where: { category: null } });
+  if (!existingPromo) {
+    await prisma.promoSettings.create({ data: { category: null, thresholdPercent: 5 } });
+  }
 
   console.log('Seeding loyalty tiers...');
   if ((await prisma.loyaltyTier.count()) === 0) {
