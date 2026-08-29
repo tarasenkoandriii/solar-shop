@@ -1,6 +1,7 @@
 'use client';
 
-import { useCurrencyContext, formatPrice } from '../lib/currency-context';
+import { useCurrencyContext } from '../lib/currency-context';
+import { formatPrice } from '../lib/currency';
 
 // rateUah тепер НЕОБОВ'ЯЗКОВИЙ (27.08.2026). Раніше кожен викликач мусив
 // дістати курс сам — і робив це двома різними способами: каталог і картка

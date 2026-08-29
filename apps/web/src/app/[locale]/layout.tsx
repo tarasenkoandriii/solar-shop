@@ -4,7 +4,14 @@ import { notFound } from 'next/navigation';
 import { isLocale, locales, type Locale } from '../../lib/i18n';
 import { CartProvider } from '../../lib/cart-context';
 import { ThemeProvider } from '../../lib/theme-context';
-import { CurrencyProvider, parseCurrencyCookie } from '../../lib/currency-context';
+// ВАЖЛИВО: провайдер (компонент) — із 'use client'-модуля, а
+// parseCurrencyCookie (звичайна функція, викликається ТУТ, на сервері) —
+// із чистого ./currency. Якщо взяти її з currency-context, Next віддасть
+// клієнтське посилання-заглушку замість функції, і сторінка впаде в проді
+// з "TypeError: d is not a function". Саме це й сталося — детально в
+// коментарі у lib/currency.ts.
+import { CurrencyProvider } from '../../lib/currency-context';
+import { parseCurrencyCookie } from '../../lib/currency';
 import { apiGet, type ExchangeRate } from '../../lib/api';
 import { Header } from '../../components/Header';
 import { Footer } from '../../components/Footer';

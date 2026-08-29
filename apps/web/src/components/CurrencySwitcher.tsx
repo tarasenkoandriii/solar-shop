@@ -1,7 +1,8 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { useCurrencyContext, type Currency } from '../lib/currency-context';
+import { useCurrencyContext } from '../lib/currency-context';
+import type { Currency } from '../lib/currency';
 
 // Переключатель USD/UAH (ТЗ п.24.3). Конвертация чисто отображенческая:
 // canonical priceUsd умножается на последний ExchangeRate.rateUah.
@@ -14,7 +15,7 @@ import { useCurrencyContext, type Currency } from '../lib/currency-context';
 export type { Currency };
 
 // Реекспорт для сумісності: на нього ще посилаються PriceTag і сторінки.
-export { formatPrice } from '../lib/currency-context';
+export { formatPrice } from '../lib/currency';
 
 export function useCurrency(): [Currency, (c: Currency) => void] {
   const { currency, setCurrency } = useCurrencyContext();
