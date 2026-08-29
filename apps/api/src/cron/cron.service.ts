@@ -319,12 +319,26 @@ export class CronService {
         const failedSummary = result.failedPoints.length > 0
           ? ` — упали: ${result.failedPoints.map((f) => `(${f.lat},${f.lng})${f.permanent ? ' [поза покриттям]' : ''}: ${f.diagnostic}`).join('; ')}`
           : '';
+        // АУДИТ 29.08.2026 — у зведенні бракувало найголовнішого для
+        // користувача: чи оновилась ПУБЛІЧНА карта. Було видно лише
+        // "ПОВНІСТЮ ЗІБРАНО" про сирі точки, тоді як сайт паралельно
+        // писав "Дані сітки ще не розраховані" — і зі звіту джоба
+        // неможливо було зрозуміти, що це різні речі.
+        // 'failed' МУСИТЬ бути видно в зведенні й у статусі: сирі точки
+        // зібрані, а публічна карта лишилась старою — це саме та тиха
+        // розбіжність, з якої почалась ця правка.
+        const mapSummary =
+          result.interpolation.status === 'rebuilt'
+            ? `, карту перебудовано (${result.interpolation.cells} клітинок)`
+            : result.interpolation.status === 'failed'
+              ? `, УВАГА: карту перебудувати НЕ вдалось (${result.interpolation.error}) — сайт показує стару сітку`
+              : '';
         return {
-          summary: `+${result.newlyComputed} нових точок за ${Math.round(result.elapsedMs / 1000)}с, прогрес ${result.progressPercent}% (${result.totalPoints - result.remainingPoints}/${result.totalPoints}), лишилось ${result.remainingPoints}${permanentCount > 0 ? ` (з них ${permanentCount} поза покриттям PVGIS назавжди)` : ''}${result.isComplete ? ' — ПОВНІСТЮ ЗІБРАНО' : ''}${failedSummary}`,
+          summary: `+${result.newlyComputed} нових точок за ${Math.round(result.elapsedMs / 1000)}с, прогрес ${result.progressPercent}% (${result.totalPoints - result.remainingPoints}/${result.totalPoints}), лишилось ${result.remainingPoints}${permanentCount > 0 ? ` (з них ${permanentCount} поза покриттям PVGIS назавжди)` : ''}${result.isComplete ? ' — ПОВНІСТЮ ЗІБРАНО' : ''}${mapSummary}${failedSummary}`,
           debugLog: debugMode ? result : undefined,
           itemsProcessed: result.newlyComputed,
           itemsFailed: result.newlyFailed,
-          status: 'SUCCESS',
+          status: result.interpolation.status === 'failed' ? 'PARTIAL' : 'SUCCESS',
         };
       }
       case 'product_review_parser': {

@@ -7,7 +7,7 @@ import { apiGet } from '../../lib/api';
 import type { Manufacturer } from '../../lib/api';
 import { notFound } from 'next/navigation';
 import { SolarPanelIcon, BatteryIcon, ControllerIcon, GenericCategoryIcon } from '../../components/icons';
-import type { CompactGridPoint } from '../../components/SolarPotentialMap';
+import { loadSolarGridPoints } from '../../lib/solar-grid';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,7 +36,7 @@ export default async function HomePage({ params }: { params: { locale: string } 
 
   const [manufacturers, solarMapPoints, allCategories] = await Promise.all([
     apiGet<Manufacturer[]>('/manufacturers', 3600).catch(() => [] as Manufacturer[]),
-    apiGet<CompactGridPoint[]>('/solar-map/grid', 86400).catch(() => [] as CompactGridPoint[]),
+    loadSolarGridPoints(),
     apiGet<CategoryPublic[]>('/categories', 60).catch(() => [] as CategoryPublic[]),
   ]);
 

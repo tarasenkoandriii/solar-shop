@@ -1,8 +1,7 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { isLocale, type Locale } from '../../../lib/i18n';
-import { apiGet } from '../../../lib/api';
-import type { CompactGridPoint } from '../../../components/SolarPotentialMap';
+import { loadSolarGridPoints } from '../../../lib/solar-grid';
 import { EnergyPotentialTabs } from '../../../components/EnergyPotentialTabs';
 
 export const dynamic = 'force-dynamic';
@@ -17,7 +16,7 @@ export default async function SolarMapPage({ params }: { params: { locale: strin
   if (!isLocale(params.locale)) notFound();
   const locale = params.locale as Locale;
 
-  const points = await apiGet<CompactGridPoint[]>('/solar-map/grid', 86400).catch(() => [] as CompactGridPoint[]);
+  const points = await loadSolarGridPoints();
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-10">

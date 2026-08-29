@@ -1,8 +1,7 @@
 import dynamic from 'next/dynamic';
 import { headers } from 'next/headers';
-import { apiGet } from '../../../lib/api';
 import { EmbedViewTracker } from '../../../components/EmbedViewTracker';
-import type { CompactGridPoint } from '../../../components/SolarPotentialMap';
+import { loadSolarGridPoints } from '../../../lib/solar-grid';
 
 const SolarPotentialMap = dynamic(
   () => import('../../../components/SolarPotentialMap').then((m) => m.SolarPotentialMap),
@@ -19,7 +18,7 @@ export default async function EmbedSolarMapPage({
 }: {
   searchParams: { theme?: string; city?: string; region?: string };
 }) {
-  const points = await apiGet<CompactGridPoint[]>('/solar-map/grid', 86400).catch(() => [] as CompactGridPoint[]);
+  const points = await loadSolarGridPoints();
   const isDark = searchParams.theme === 'dark';
   const refererHost = headers().get('referer');
 

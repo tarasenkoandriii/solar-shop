@@ -161,6 +161,10 @@ export class ParserService {
         if (!adapter) continue; // поставщик заведён в БД, но адаптер ещё не реализован — пропускаем, не роняем весь прогон
 
         console.log(`[ParserService] Обробляю вендора "${vendor.name}"...`);
+        // Фіксуємо ДО скрейпу: усе, що не оновиться за цей прогін, за цією
+        // міткою й буде визначено як зникле (див.
+        // markVanishedListingsOutOfStock).
+        const vendorRunStartedAt = new Date();
         try {
           const { listings, isComplete: scrapeComplete } = await adapter.fetchListings(deadlineAt);
           const vendorResult = await this.runForVendor(vendor.id, adapter.vendorName, listings, deadlineAt, cache);
@@ -187,8 +191,35 @@ export class ParserService {
         if (vendorResult.skipped && vendorResult.skipped === vendorResult.fetched && vendorResult.fetched > 0) {
           vendorResult.error = `Усі ${vendorResult.skipped} позицій пропущено (немає курсу або нерозбірна ціна) — нічого не записано.`;
         }
+        // АУДИТ 27.08.2026. fetchWithRetry повторює лише 5xx і 429 — на
+        // 403 (капча, бан по IP) або 404 (змінилась структура URL)
+        // адаптер отримує httpOk:false, виходить із циклу і повертає
+        // { listings: [], isComplete: true }. Далі все виглядало як
+        // бездоганний прогін: failed=0, skipped=0, lastFullyParsedAt
+        // проставлено, крон рапортує SUCCESS. Постачальник міг місяцями
+        // не парситись при зеленій панелі, а його заморожені ціни
+        // продовжували продаватись.
+        //
+        // Обидві наявні гілки-детектори вище вимагають fetched > 0 і тому
+        // цей випадок не ловлять у принципі.
+        //
+        // Відрізняємо "порожній каталог" від "нас не пустили" не
+        // здогадкою, а фактом: якщо в базі за цим вендором уже є
+        // листинги, а скрейп повернув нуль — це збій. Для справді нового
+        // вендора (листингів ще немає) нуль лишається законним.
+        if (vendorResult.fetched === 0) {
+          const knownListings = await this.prisma.client.sourceListing.count({ where: { vendorId: vendor.id } });
+          if (knownListings > 0) {
+            vendorResult.error = `Скрейп повернув 0 позицій, хоча в базі за цим постачальником уже є ${knownListings}. Найімовірніше — 403/404/капча або змінилась розмітка. Наявність і ціни НЕ чіпаємо, вендор лишається в черзі.`;
+            this.logger.error(`[${vendor.name}] ${vendorResult.error}`);
+            results[results.length - 1] = vendorResult;
+            continue; // lastFullyParsedAt НЕ проставляємо — вендор піде першим наступного разу
+          }
+        }
+
         const isVendorComplete = scrapeComplete && vendorResult.isComplete;
           if (isVendorComplete) {
+            await this.markVanishedListingsOutOfStock(vendor.id, vendor.name, vendorRunStartedAt, cache);
             await this.prisma.client.vendor.update({
               where: { id: vendor.id },
               data: { lastFullyParsedAt: new Date() },
@@ -339,6 +370,53 @@ export class ParserService {
         `${skipped > 0 ? `, ${skipped} пропущено` : ''}. Зачеплено ${new Set(links.map((l) => l.productId)).size} товарів — ` +
         'їхній ціновий кеш оновиться в кінці прогону.',
     );
+  }
+
+  // АУДИТ 27.08.2026 — знята з продажу позиція вічно лишалась "у наявності".
+  //
+  // inStock оновлювався ТІЛЬКИ для листингів, що прийшли в поточній
+  // видачі адаптера. Жоден запит у проєкті не переводив листинг у false
+  // за давністю і не видаляв зниклі: stockCheckedAt лише писався й ніде
+  // не читався, lastParsedAt читався в одному місці — для бейджа статусу
+  // вендора в адмінці.
+  //
+  // Наслідок прямий і грошовий: pricing.ts рахує ціну по листингах, у
+  // яких inStock=true. Позиція, яку постачальник зняв пів року тому,
+  // вічно формувала і собівартість, і публічну ціну, потрапляла в
+  // комплекти калькулятора й у рахунки. Замовлення йшло за ціною, якої
+  // вже не існує в жодного постачальника.
+  //
+  // Викликається ЛИШЕ після повного прогону вендора (isVendorComplete) —
+  // це критично. Після часткового прогону "не бачили в цій видачі" не
+  // означає "зникло": ми просто не дійшли до тієї сторінки, і масове
+  // зняття з продажу половини каталогу було б гіршим за початковий баг.
+  private async markVanishedListingsOutOfStock(vendorId: string, vendorName: string, runStartedAt: Date, cache: ParserRunCache): Promise<void> {
+    // Кандидати — ті, що зараз значаться в наявності, але цього прогону
+    // не оновлювались. Спершу читаємо productId, бо після updateMany
+    // зв'язок із товарами доведеться шукати вже по зміненому стану.
+    const vanished = await this.prisma.client.sourceListing.findMany({
+      where: { vendorId, inStock: true, stockCheckedAt: { lt: runStartedAt } },
+      select: { id: true, products: { select: { productId: true } } },
+    });
+
+    if (vanished.length === 0) return;
+
+    await this.prisma.client.sourceListing.updateMany({
+      where: { id: { in: vanished.map((l) => l.id) } },
+      data: { inStock: false, stockCheckedAt: new Date() },
+    });
+
+    console.log(`[ParserService] "${vendorName}": ${vanished.length} позицій зникли з видачі — переведено в "немає в наявності".`);
+
+    // Ціновий кеш товарів, яких це торкнулось, тепер неактуальний:
+    // зникла позиція могла бути найдешевшою і тримати ціну заниженою.
+    // Перераховуємо через ту саму чергу, що й решта прогону, — щоб не
+    // робити по чотири запити на товар прямо тут.
+    for (const listing of vanished) {
+      for (const link of listing.products) {
+        cache.pendingPricingProductIds.add(link.productId);
+      }
+    }
   }
 
   private async runForVendor(vendorId: string, vendorName: string, rawListings: RawListing[], deadlineAt: number, cache: ParserRunCache): Promise<ParserRunResult & { isComplete: boolean }> {

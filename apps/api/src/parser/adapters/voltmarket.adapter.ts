@@ -51,7 +51,13 @@ export class VoltmarketAdapter implements ISourceAdapter {
 
       const url = page === 1 ? baseUrl : `${baseUrl}?page=${page}`;
       const { html, httpOk } = await fetchCategoryPageHtml(url);
-      if (!httpOk) break;
+      // АУДИТ 27.08.2026: було `break` — цикл сторінок обривався, а метод
+      // повертав isComplete: true. Тобто 403 чи капча на третій сторінці
+      // виглядали як повністю обійдена категорія. Це стало критичним,
+      // коли ParserService почав знімати з продажу позиції, яких не
+      // побачив у ПОВНОМУ прогоні: половина каталогу пішла б у "немає в
+      // наявності" через одну невдалу сторінку.
+      if (!httpOk) return { listings, isComplete: false };
 
       const $ = cheerio.load(html);
       if (page === 1) siteCategoryLabel = extractPageCategoryLabel($);

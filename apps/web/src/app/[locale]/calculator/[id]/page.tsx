@@ -101,6 +101,15 @@ export default function CalculatorResultPage() {
         </p>
       )}
 
+      {/* Аудит 27.08.2026: якщо ємність акумуляторів у каталозі не
+          вказана, кількість у кошторисі — заглушка (1 шт.), і людина має
+          побачити це одразу, а не знайти всередині згорнутого блоку
+          "Обґрунтування вибору". Читаємо зі збереженого estimate, а не з
+          відповіді start/refine: ця сторінка відповіді не бачить. */}
+      {estimate.selectionReasoning?.batteryWarning && (
+        <p className="rounded-lg bg-orange-50 p-3 text-sm text-orange-700">{estimate.selectionReasoning.batteryWarning}</p>
+      )}
+
       {!estimate.cableRunMeters && estimate.recommendedSpec.some((i) => i.category === 'CABLE') && (
         <p className="rounded-lg bg-blue-50 p-3 text-sm text-blue-700">
           Відстань до точки підключення споживача не вказана — кабель у кошторисі розрахований за орієнтовним

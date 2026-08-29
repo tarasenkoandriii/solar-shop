@@ -65,6 +65,9 @@ const DEFAULT_INTERPOLATION_RESOLUTION = 60; // ~60 ячеек по больше
 @Injectable()
 export class SolarMapService {
   private readonly logger = new Logger(SolarMapService.name);
+  // Перебудови інтерполяції, що зараз виконуються, за ключем
+  // "countryCode:resolution" — див. getGridPoints().
+  private readonly interpolationInFlight = new Map<string, Promise<CompactPoint[]>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -89,17 +92,97 @@ export class SolarMapService {
     return rows.map((r) => ({ lat: r.lat, lng: r.lng, value: Number(r.annualKwhPerKwp) }));
   }
 
+  // Той самий фільтр, що getRawSamplePoints(), але лише COUNT — щоб на
+  // кожен публічний запит карти не тягти 600 рядків із БД заради
+  // порівняння з sourcePoints збереженої сітки (див. getGridPoints).
+  private countRawSamplePoints(countryCode: string): Promise<number> {
+    const bounds = getCountryBounds(countryCode);
+    return this.prisma.client.solarYieldEstimate.count({
+      where: {
+        tiltDegrees: 35,
+        azimuthDegrees: 0,
+        lat: { gte: bounds.latMin, lte: bounds.latMax },
+        lng: { gte: bounds.lngMin, lte: bounds.lngMax },
+      },
+    });
+  }
+
   // Публичный метод для карты — возвращает интерполированную сетку
   // компактными кортежами [lat, lng, annualKwhPerKwp]. Если кэш ещё не
   // построен — строит на лету и кэширует. countryCode параметром —
   // підготовка до мультикраїнності, дефолт 'UA' зберігає поточну
   // поведінку без змін для всіх наявних викликів.
+  //
+  // АУДИТ 29.08.2026 — знайдено наживо. Крон pvgis_country_grid зібрав
+  // 589 сирих точок і відзвітував "ПОВНІСТЮ ЗІБРАНО", а публічна карта
+  // далі писала "Дані сітки ще не розраховані". Причина була саме тут:
+  // збережена сітка віддавалась БЕЗУМОВНО, скільки б нових сирих точок
+  // після неї не з'явилось. Крон додає точки в SolarYieldEstimate й
+  // НІКОЛИ не перебудовує інтерполяцію (cron.service.ts, case
+  // 'pvgis_country_grid' — там був лише computeRawGridChunk), а ручний
+  // recompute-interpolation в адмінці ніхто не натискав. Тобто карта
+  // назавжди залишалась знімком того моменту, коли її вперше хтось
+  // запросив — у гіршому випадку порожнім знімком (див. нижче).
+  //
+  // Тому: sourcePoints збереженої сітки звіряється з поточною кількістю
+  // сирих точок. Розійшлись — перебудовуємо. Це один COUNT на запит
+  // (індексований, ~600 рядків), не 600 рядків даних, і воно робить
+  // карту самовідновлюваною незалежно від того, чи хтось не забув
+  // смикнути перерахунок.
   async getGridPoints(resolution = DEFAULT_INTERPOLATION_RESOLUTION, countryCode = DEFAULT_COUNTRY): Promise<CompactPoint[]> {
-    const cached = await this.prisma.client.solarMapInterpolatedGrid.findUnique({
-      where: { countryCode_resolution: { countryCode, resolution } },
-    });
-    if (cached) return cached.cellsJson as unknown as CompactPoint[];
-    return this.recomputeInterpolation(resolution, countryCode);
+    const [cached, currentSamples] = await Promise.all([
+      this.prisma.client.solarMapInterpolatedGrid.findUnique({
+        where: { countryCode_resolution: { countryCode, resolution } },
+      }),
+      this.countRawSamplePoints(countryCode),
+    ]);
+
+    const cells = (cached?.cellsJson as unknown as CompactPoint[] | undefined) ?? [];
+    const usableCells = Array.isArray(cells) && cells.length > 0 ? cells : null;
+
+    if (cached && usableCells && cached.sourcePoints === currentSamples) return usableCells;
+
+    if (cached) {
+      // Дві різні причини перебудови — і в лозі вони мають виглядати
+      // по-різному: "не збігається кількість точок" і "збережена сітка
+      // порожня" діагностуються зовсім не однаково. Порожня збережена
+      // сітка досяжна лише через importData з порожнім cells, але
+      // наслідок ("карта не розрахована" назавжди) надто дорогий, щоб
+      // покладатись на те, що такого файлу ніхто не заллє.
+      this.logger.log(
+        usableCells
+          ? `Інтерпольована сітка (${countryCode}, resolution=${resolution}) застаріла: ${cached.sourcePoints} → ${currentSamples} сирих точок — перебудовую.`
+          : `Інтерпольована сітка (${countryCode}, resolution=${resolution}) збережена порожньою — перебудовую.`,
+      );
+    }
+
+    // Single-flight: паралельні запити до карти чекають ОДНУ перебудову,
+    // а не запускають по своїй. Це публічна сторінка без rate-limit
+    // (включно з /embed/solar-map у чужих iframe), а перебудова — це
+    // ~1647 клітинок × ~600 семплів гаверсинусів на однопотоковому
+    // event loop плюс upsert ~41 КБ JSON. Дедуп у межах інстанса, не
+    // глобальний (serverless), але саме сплеск на одному інстансі й
+    // коштує дорого.
+    const key = `${countryCode}:${resolution}`;
+    const inFlight = this.interpolationInFlight.get(key);
+    if (inFlight) return inFlight;
+
+    const promise = this.recomputeInterpolation(resolution, countryCode)
+      .catch((err) => {
+        // КЛЮЧОВЕ: перебудова падає (таймаут пулера Supabase під час
+        // 200-секундного крону, statement timeout на upsert) — а в руках
+        // у нас лежить цілком робоча збережена сітка. Віддати 500 і
+        // показати відвідувачу "дані ще не розраховані" замість трохи
+        // застарілої карти — це рівно той симптом, заради якого вся ця
+        // правка й робилась. Тому: є що віддати — віддаємо.
+        this.logger.error(`Не вдалось перебудувати інтерпольовану сітку (${key}): ${err}`);
+        if (usableCells) return usableCells;
+        throw err;
+      })
+      .finally(() => this.interpolationInFlight.delete(key));
+
+    this.interpolationInFlight.set(key, promise);
+    return promise;
   }
 
   async recomputeInterpolation(resolution = DEFAULT_INTERPOLATION_RESOLUTION, countryCode = DEFAULT_COUNTRY): Promise<CompactPoint[]> {
@@ -137,7 +220,7 @@ export class SolarMapService {
       }
     }
 
-    const interpolated = await this.recomputeInterpolation();
+    const interpolated = await this.recomputeInterpolation(DEFAULT_INTERPOLATION_RESOLUTION, countryCode);
 
     return { pointsComputed: computed, pointsFailed: failed, interpolatedCells: interpolated.length };
   }
@@ -189,6 +272,17 @@ export class SolarMapService {
     isComplete: boolean;
     elapsedMs: number;
     progressPercent: number;
+    // АУДИТ 29.08.2026 — раніше цей джоб лише наповнював сирий кеш і
+    // мовчки лишав публічну карту такою, якою вона була — звідси
+    // "589/629, ПОВНІСТЮ ЗІБРАНО" в адмінці проти "дані ще не
+    // розраховані" на сайті. Тепер він її перебудовує й ЗВІТУЄ про це.
+    //
+    // Три стани, а не число з null: 'skipped' (нових точок не було —
+    // нічого перебудовувати) і 'failed' (перебудова впала) — це зовсім
+    // різні речі, і саме їх злиття в одне "нічого не написано в
+    // зведенні" відтворило б ту саму розбіжність, заради якої поле й
+    // додане.
+    interpolation: { status: 'rebuilt'; cells: number } | { status: 'skipped' } | { status: 'failed'; error: string };
   }> {
     const startedAt = Date.now();
     // Найгірший випадок одного виклику PVGIS (fetchWithRetry всередині
@@ -213,7 +307,17 @@ export class SolarMapService {
       select: { lat: true, lng: true },
     });
     const cachedSet = new Set(cachedRows.map((r) => `${r.lat},${r.lng}`));
-    const alreadyCachedAtStart = cachedSet.size;
+    // АУДИТ 29.08.2026 — тут було `cachedSet.size`, тобто ВСІ рядки
+    // PVGIS-кешу. А SolarYieldEstimate — кеш СПІЛЬНИЙ: калькулятор
+    // (CalculatorService.exportPackage → getAnnualKwhPerKwp(city.lat,
+    // city.lng)) пише туди координати міст Нової Пошти з тими самими
+    // дефолтними tilt 35 / azimuth 0. Це довільні числа на кшталт
+    // 50.4501 — вони НІКОЛИ не є точками сітки, але роздували лічильник
+    // "вже пораховано" і віднімались від remainingPoints. Наслідок:
+    // 584 реальні точки сітки + 5 міст = 589 → remainingPoints = 0 →
+    // "ПОВНІСТЮ ЗІБРАНО", тоді як три точки сітки ще не зібрані.
+    // Рахуємо тільки перетин зі справжнім списком точок сітки.
+    const alreadyCachedAtStart = allPoints.filter((p) => cachedSet.has(`${p.lat},${p.lng}`)).length;
 
     let newlyComputed = 0;
     const failedPoints: { lat: number; lng: number; diagnostic: string; permanent: boolean }[] = [];
@@ -249,6 +353,29 @@ export class SolarMapService {
     // непостійну класифікацію "permanent" без реальної повторної
     // перевірки), але коректно порахує це як завершений цикл, не
     // "недороблений".
+    // Перебудова інтерполяції ОДРАЗУ після додавання сирих точок — не
+    // наступним окремим джобом і не ручним кліком в адмінці. Дешево
+    // (чиста математика по ~600 точках, частки секунди проти 200с
+    // бюджету самого джоба) і прибирає цілий клас розбіжностей
+    // "адмінка каже 100%, сайт каже нічого немає".
+    //
+    // Помилка тут НЕ валить прогін: сирі точки вже збережені, це головне;
+    // getGridPoints() однаково перебудує сітку на першому ж запиті, бо
+    // звіряє sourcePoints. Тому лише лог.
+    let interpolation: { status: 'rebuilt'; cells: number } | { status: 'skipped' } | { status: 'failed'; error: string } = {
+      status: 'skipped',
+    };
+    if (newlyComputed > 0) {
+      try {
+        const cells = await this.recomputeInterpolation(DEFAULT_INTERPOLATION_RESOLUTION, countryCode);
+        interpolation = { status: 'rebuilt', cells: cells.length };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Не вдалось перебудувати інтерполяцію після збору сирих точок: ${message}`);
+        interpolation = { status: 'failed', error: message };
+      }
+    }
+
     const permanentlyFailedCount = failedPoints.filter((f) => f.permanent).length;
     const remainingPoints = Math.max(0, totalPoints - alreadyCachedAtStart - newlyComputed - permanentlyFailedCount);
     const isComplete = remainingPoints === 0 && !stoppedEarlyOnBudget;
@@ -269,6 +396,7 @@ export class SolarMapService {
       isComplete,
       elapsedMs: Date.now() - startedAt,
       progressPercent,
+      interpolation,
     };
   }
 
@@ -278,24 +406,38 @@ export class SolarMapService {
   // після запуску джоба.
   async getRawGridCoverage(stepDegrees = DEFAULT_STEP_DEGREES, countryCode = DEFAULT_COUNTRY): Promise<{ totalPoints: number; cachedPoints: number; progressPercent: number }> {
     const bounds = getCountryBounds(countryCode);
-    let totalPoints = 0;
+    const gridKeys = new Set<string>();
     for (let lat = bounds.latMin; lat <= bounds.latMax; lat += stepDegrees) {
       for (let lng = bounds.lngMin; lng <= bounds.lngMax; lng += stepDegrees) {
-        totalPoints++;
+        gridKeys.add(`${Math.round(lat * 100) / 100},${Math.round(lng * 100) / 100}`);
       }
     }
-    // Той самий географічний фільтр, що й getRawSamplePoints() — інакше
-    // точки іншої країни (коли вона з'явиться) роздували б лічильник
-    // "вже пораховано" для цієї країни.
-    const cachedPoints = await this.prisma.client.solarYieldEstimate.count({
+    const totalPoints = gridKeys.size;
+
+    // АУДИТ 29.08.2026 — тут був COUNT усіх рядків кешу в межах країни,
+    // а SolarYieldEstimate спільний із калькулятором (координати міст
+    // Нової Пошти пишуться туди з тими самими tilt 35 / azimuth 0).
+    // Місто — не точка сітки, але воно потрапляло в лічильник, і
+    // `Math.min(cachedPoints, totalPoints)` це маскував: щойно сума
+    // переростала totalPoints, адмінка бачила рівно 100% незалежно від
+    // реального покриття. Тепер звіряємо КООРДИНАТИ з детермінованим
+    // списком точок сітки — той самий принцип, що в
+    // computeRawGridChunk(), щоб два лічильники не розходились.
+    const rows = await this.prisma.client.solarYieldEstimate.findMany({
       where: {
         tiltDegrees: 35,
         azimuthDegrees: 0,
         lat: { gte: bounds.latMin, lte: bounds.latMax },
         lng: { gte: bounds.lngMin, lte: bounds.lngMax },
       },
+      select: { lat: true, lng: true },
     });
-    return { totalPoints, cachedPoints: Math.min(cachedPoints, totalPoints), progressPercent: totalPoints > 0 ? Math.round((Math.min(cachedPoints, totalPoints) / totalPoints) * 100) : 100 };
+    let cachedPoints = 0;
+    for (const r of rows) {
+      if (gridKeys.has(`${r.lat},${r.lng}`)) cachedPoints++;
+    }
+
+    return { totalPoints, cachedPoints, progressPercent: totalPoints > 0 ? Math.round((cachedPoints / totalPoints) * 100) : 100 };
   }
 
   // За прямим запитом користувача ("pvgis кеш как обнулить") — раніше

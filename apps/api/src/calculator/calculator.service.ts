@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { ProductStatus, resolveTopologyFromGoals, buildSchemaTemplateSvg, type SchemaTopologyValue } from '@solar-shop/db';
+import { ProductStatus, resolveTopologyFromGoals, buildSchemaTemplateSvg, batteryCapacityKwh, batteryCountFor, INVERTER_EFFICIENCY, type SchemaTopologyValue } from '@solar-shop/db';
 import { PrismaService } from '../prisma/prisma.service';
 import { GrokService, GrokCalculatorRequirements } from '../grok/grok.service';
 import { PvgisService } from './pvgis.service';
@@ -36,6 +36,10 @@ interface ResolveResult {
   // застосовується консервативний дефолт (не мовчки занижуємо кошторис
   // без жодного попередження користувачу).
   cableWarning?: string;
+  // Аудит 27.08.2026 — той самий принцип, що й cableWarning: якщо
+  // порахувати чесно неможливо, кажемо про це вголос, а не підставляємо
+  // число зі стелі (саме так і з'явився фолбек 3.5 кВт·год).
+  batteryWarning?: string;
   // За прямим запитом користувача — "написать обоснование выбора
   // компонентов системы, и учтены ли рекомендации при подборе и
   // какие". Детермінований запис ФАКТИЧНОЇ причини вибору кожного
@@ -145,7 +149,7 @@ export class CalculatorService {
         hasExistingInverter: dto.hasExistingInverter ?? false,
         scalingStrategy: dto.scalingStrategy,
         recommendedSpec: resolved.spec as unknown as object,
-        selectionReasoning: { reasoning: resolved.selectionReasoning, goalsAlignmentText: resolved.goalsAlignmentText } as unknown as object,
+        selectionReasoning: { reasoning: resolved.selectionReasoning, goalsAlignmentText: resolved.goalsAlignmentText, batteryWarning: resolved.batteryWarning } as unknown as object,
         totalUsd: resolved.totalUsd,
         conversationLog: [
           { role: 'user', type: 'quiz', input: dto, at: new Date().toISOString() },
@@ -168,6 +172,7 @@ export class CalculatorService {
       withinBudget: resolved.withinBudget,
       budgetGapUsd: resolved.budgetGapUsd,
       cableWarning: resolved.cableWarning,
+      batteryWarning: resolved.batteryWarning,
       blockDiagramSvg: topology ? await this.renderDiagram(topology, resolved.spec, false) : null,
     };
   }
@@ -232,7 +237,7 @@ export class CalculatorService {
       where: { id: estimateId },
       data: {
         recommendedSpec: resolved.spec as unknown as object,
-        selectionReasoning: { reasoning: resolved.selectionReasoning, goalsAlignmentText: resolved.goalsAlignmentText } as unknown as object,
+        selectionReasoning: { reasoning: resolved.selectionReasoning, goalsAlignmentText: resolved.goalsAlignmentText, batteryWarning: resolved.batteryWarning } as unknown as object,
         totalUsd: resolved.totalUsd,
         conversationLog: updatedLog as unknown as object,
       },
@@ -244,6 +249,7 @@ export class CalculatorService {
       withinBudget: resolved.withinBudget,
       budgetGapUsd: resolved.budgetGapUsd,
       cableWarning: resolved.cableWarning,
+      batteryWarning: resolved.batteryWarning,
       blockDiagramSvg: updated.schemaTopology
         ? await this.renderDiagram(updated.schemaTopology, resolved.spec, false)
         : null,
@@ -639,6 +645,13 @@ export class CalculatorService {
       });
     }
 
+    // batteryWarning оголошено тут, ДО блоку акумуляторів: cableWarning
+    // нижче оголошений біля свого блоку, і при копіюванні того ж патерну
+    // змінна опинилася б після місця присвоєння — це не косметика, а
+    // ReferenceError у рантаймі (temporal dead zone), який тут ніщо б не
+    // спіймало: сид і сервіс компілюються, а падає вже на живому запиті.
+    let batteryWarning: string | undefined;
+
     // Аккумулятор — совпадение по химии (если задана), ближайшая ёмкость
     if (requirements.batteryKwhTarget > 0) {
       const batteries = await this.prisma.client.product.findMany({
@@ -657,11 +670,43 @@ export class CalculatorService {
               where: { category: 'BATTERY', status: ProductStatus.PUBLISHED, cachedInStock: true },
               orderBy: { cachedPriceUsd: 'asc' },
             });
-      const batteryPick = await this.pickWithReliability(pool, trustRecommendations);
+      // АУДИТ 27.08.2026. Нижче був рядок
+      //   const capacityKwh = Number(specs.capacityKwh ?? 3.5);
+      // — а поля capacityKwh у товарів парсера немає взагалі
+      // (extractSpecsFromTitle витягує capacityAh), тож для КОЖНОГО
+      // спарсеного акумулятора спрацьовував фолбек 3.5. Плюс не
+      // враховувались ні глибина розряду, ні ККД інвертора. Розбір і
+      // числа — у packages/db/src/battery.ts.
+      //
+      // Відсіюємо товари, для яких ємність порахувати нічим: краще взяти
+      // наступний за ціною акумулятор із зрозумілими характеристиками,
+      // ніж рахувати кількість від вигаданого числа.
+      const poolWithCapacity = pool.filter((b) => batteryCapacityKwh(b.specs) !== null);
+
+      // Якщо ЖОДЕН акумулятор не має придатних характеристик — беремо
+      // повний pool назад. Інакше вийшло б гірше за початковий баг:
+      // блок `if (bestBattery)` нижче просто не виконався б, і кошторис
+      // поїхав би клієнту БЕЗ акумулятора взагалі, мовчки. Помилкова
+      // кількість хоча б видима; відсутня позиція — ні.
+      //
+      // Кількість у цьому разі не вигадуємо: ставимо 1 і кажемо прямо,
+      // що її має підтвердити менеджер.
+      const capacityUnknown = poolWithCapacity.length === 0 && pool.length > 0;
+      if (capacityUnknown) {
+        batteryWarning =
+          'Кількість акумуляторів потребує уточнення: у каталозі не вказані ємність і напруга жодної відповідної моделі. У кошторисі поставлено 1 шт. — менеджер перерахує під ваші потреби.';
+        this.logger.error(`Підбір акумуляторів: жоден із ${pool.length} товарів не має даних для розрахунку ємності (capacityAh + voltageV або capacityKwh). Кошторис піде з кількістю 1 і попередженням.`);
+      }
+
+      const batteryPick = await this.pickWithReliability(capacityUnknown ? pool : poolWithCapacity, trustRecommendations);
       const bestBattery = batteryPick.chosen;
       if (bestBattery) {
-        const capacityKwh = Number((bestBattery.specs as Record<string, unknown>).capacityKwh ?? 3.5);
-        const quantity = Math.max(1, Math.ceil(requirements.batteryKwhTarget / capacityKwh));
+        const nominalKwh = batteryCapacityKwh(bestBattery.specs);
+        const sizing = nominalKwh === null ? null : batteryCountFor(requirements.batteryKwhTarget, nominalKwh, requirements.batteryChemistry);
+        const capacityKwh = sizing?.nominalKwhPerUnit ?? nominalKwh;
+        // 1 шт. — свідомо не «розумний» дефолт, а мітка «порахувати
+        // вручну», і вона завжди йде разом із batteryWarning вище.
+        const quantity = sizing?.quantity ?? 1;
         spec.push({
           productId: bestBattery.id,
           articleNumber: bestBattery.articleNumber,
@@ -683,7 +728,9 @@ export class CalculatorService {
             ? `Обрано не найдешевший, а варіант із рейтингом надійності ${batteryPick.reliabilityScore}/10 (${batteryPick.reliabilityReviewCount} відгуків від покупців) серед 3 найдешевших підходящих — за вашим бажанням довіряти рекомендаціям.`
             : trustRecommendations
               ? 'Розглянуто рейтинг надійності серед найдешевших варіантів, але жоден не мав достатньо відгуків (мінімум 3) з високим рейтингом (від 7/10) — обрано найдешевший підходящий варіант.'
-              : `Обрано найдешевший підходящий варіант місткістю ${capacityKwh} кВт·год${requirements.batteryChemistry ? ` (хімія ${requirements.batteryChemistry})` : ''}.`,
+              : sizing
+                ? `Обрано найдешевший підходящий варіант номіналом ${capacityKwh} кВт·год${requirements.batteryChemistry ? ` (хімія ${requirements.batteryChemistry})` : ''}. Корисна ємність однієї банки — ${sizing.usableKwhPerUnit} кВт·год (враховано допустиму глибину розряду ${Math.round(sizing.depthOfDischarge * 100)}% і ККД інвертора ${Math.round(INVERTER_EFFICIENCY * 100)}%), тому під ціль ${requirements.batteryKwhTarget} кВт·год потрібно ${quantity} шт.`
+                : `Обрано найдешевший підходящий варіант${requirements.batteryChemistry ? ` (хімія ${requirements.batteryChemistry})` : ''}. Ємність у характеристиках товару не вказана, тому кількість розрахувати неможливо — поставлено 1 шт., менеджер уточнить.`,
         });
       }
     }
@@ -962,7 +1009,7 @@ export class CalculatorService {
         ? `Конфігурація розрахована під заявлені цілі: ${goalLabels.join(', ')}. Цільова потужність панелей ${Math.round(requirements.panelsWattTarget)}Вт та ємність накопичення ${requirements.batteryKwhTarget} кВт·год визначені виходячи саме з цих цілей (не з бюджету — бюджет лише обмежує остаточний вибір моделей).`
         : 'Цілі проєкту не вказані в цьому розрахунку — конфігурація базується лише на технічних параметрах (споживання/бюджет).';
 
-    return { spec, totalUsd: Math.round(totalUsd * 100) / 100, withinBudget, budgetGapUsd, cableWarning, selectionReasoning, goalsAlignmentText };
+    return { spec, totalUsd: Math.round(totalUsd * 100) / 100, withinBudget, budgetGapUsd, cableWarning, batteryWarning, selectionReasoning, goalsAlignmentText };
   }
 
   // За прямим запитом користувача — "учитывать это поле рекомендации

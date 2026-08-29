@@ -104,14 +104,37 @@ export class MatchingService {
     const category = await this.categories.resolveCategoryKey(listing.rawCategory ?? '', listing.siteCategoryLabel, cache);
 
     // 1. SKU_EXACT — совпадение по извлечённому manufacturerSku в рамках категории
+    //
+    // АУДИТ 27.08.2026 — тут додано ДРУГИЙ бар'єр: збіг артикула тепер
+    // ще й має пройти жорсткий фільтр характеристик.
+    //
+    // Причина: ця гілка прив'язує з упевненістю 1.0 В ОБХІД модерації, і
+    // якщо "артикул" виявиться сміттям, різні товари зливаються мовчки, а
+    // публічна ціна злитого товару падає до найдешевшого з них. Перший
+    // бар'єр (відсів хімії та одиниць виміру в
+    // extractManufacturerSkuCandidate) прибирає основну масу, але
+    // справжній артикул теж буває спільним для варіантів однієї серії —
+    // тоді різниця саме в характеристиках.
+    //
+    // Порівняння тут дешеве: specs у товару вже збережені, зайвих запитів
+    // немає — лише одне додаткове поле у вибірці.
     if (skuCandidate) {
       const skuMatch = await this.prisma.client.product.findFirst({
         where: { manufacturerSku: skuCandidate, ...(category ? { category } : {}) },
-        select: { id: true, category: true },
+        select: { id: true, category: true, specs: true },
       });
-      if (skuMatch) {
+      if (skuMatch && specsCompatible(extractedSpecs, (skuMatch.specs ?? {}) as ExtractedSpecs)) {
         await this.linkListing(listing.id, skuMatch.id, MatchType.SKU_EXACT, 1, listing.images, skuMatch.category, cache);
         return;
+      }
+      if (skuMatch) {
+        // Не мовчимо: збіг артикула при розбіжних характеристиках — це
+        // або сміттєвий кандидат, або справді різні варіанти серії.
+        // Далі листинг піде звичайним шляхом через нечіткий матчинг і
+        // модерацію, але слід у логах лишити варто.
+        this.logger.warn(
+          `Артикул "${skuCandidate}" збігся з товаром ${skuMatch.id}, але характеристики різні — привʼязку за артикулом пропущено, листинг ${listing.id} піде на нечіткий матчинг.`,
+        );
       }
     }
 
