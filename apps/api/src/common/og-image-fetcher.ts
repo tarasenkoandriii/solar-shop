@@ -214,9 +214,48 @@ async function buildBrowserLaunchPlan(): Promise<BrowserLaunchPlan> {
   // ідіом уже застосований у grok.service.ts для GROK_MODEL.
   const packUrl = process.env.CHROMIUM_PACK_URL?.trim() || DEFAULT_CHROMIUM_PACK_URL;
 
-  const precheck = await packUrlLooksLikeTar(packUrl);
-  if (!precheck.ok) {
-    return { kind: 'unavailable', diagnostic: `архів Chromium недоступний (${packUrl}): ${precheck.reason}` };
+  // ПІДКАЗКА ПРО РАНТАЙМ — те, без чого весь цей код не працює на
+  // Vercel. Перший деплой упав саме тут:
+  //
+  //   /tmp/chromium: error while loading shared libraries: libnss3.so
+  //
+  // Chromium тягне за собою власні системні бібліотеки (libnss3,
+  // libexpat, libnssutil3 — усього 9 файлів), і вони лежать в архіві
+  // окремо: al2.tar.br для Amazon Linux 2, al2023.tar.br для AL2023.
+  // Але розпаковує їх бібліотека ЛИШЕ якщо вважає, що працює в AWS
+  // Lambda, а перевіряє вона це по AWS_EXECUTION_ENV /
+  // AWS_LAMBDA_JS_RUNTIME (helper.js: isRunningInAwsLambda). Vercel не
+  // виставляє ЖОДНОЇ з них — хоча під капотом це та сама Lambda. Тому
+  // бінарник розпаковувався, а бібліотеки до нього — ні, і LD_LIBRARY_PATH
+  // лишався порожнім.
+  //
+  // Ставимо підказку самі. AWS_LAMBDA_JS_RUNTIME — рівно той варіант,
+  // який бібліотека передбачає для не-AWS майданчиків (у коментарі
+  // helper.js: "is for netlify instances"), тож це підтримуваний шлях,
+  // а не обхід. Вибір гілки — за версією Node: 20 і новіші рантайми
+  // Vercel зібрані на AL2023, 18-й — на AL2. Якщо ми справді в Lambda
+  // й змінна вже є, НЕ чіпаємо її.
+  //
+  // Виставити треба ДО import: модуль читає ці змінні у своєму тілі, на
+  // етапі завантаження, і саме там формує LD_LIBRARY_PATH.
+  if (!process.env.AWS_EXECUTION_ENV && !process.env.AWS_LAMBDA_JS_RUNTIME) {
+    const nodeMajor = Number(process.versions.node.split('.')[0]);
+    process.env.AWS_LAMBDA_JS_RUNTIME = nodeMajor >= 20 ? 'nodejs20.x' : 'nodejs18.x';
+  }
+  const expectedLibDir = process.env.AWS_LAMBDA_JS_RUNTIME?.includes('20.x') ? '/tmp/al2023/lib' : '/tmp/al2/lib';
+
+  // Якщо архів уже розпакований на цьому інстансі — беремо теку, а не
+  // URL: інакше кожна повторна спроба качала б 65 МБ заново. Заразом це
+  // єдиний шлях полагодити інстанс, на якому /tmp/chromium лишився від
+  // попереднього (зламаного) деплою.
+  const packDir = '/tmp/chromium-pack';
+  const haveLocalPack = (await fileSizeOrZero(`${packDir}/chromium.br`)) > 0;
+
+  if (!haveLocalPack) {
+    const precheck = await packUrlLooksLikeTar(packUrl);
+    if (!precheck.ok) {
+      return { kind: 'unavailable', diagnostic: `архів Chromium недоступний (${packUrl}): ${precheck.reason}` };
+    }
   }
 
   try {
@@ -227,11 +266,33 @@ async function buildBrowserLaunchPlan(): Promise<BrowserLaunchPlan> {
     // варіанти, щоб не залежати від налаштувань компіляції.
     const chromium = ((mod as { default?: unknown }).default ?? mod) as typeof import('@sparticuz/chromium-min');
 
-    const executablePath = await withTimeout(
-      chromium.executablePath(packUrl),
+    let executablePath = await withTimeout(
+      chromium.executablePath(haveLocalPack ? packDir : packUrl),
       CHROMIUM_DOWNLOAD_TIMEOUT_MS,
       `завантаження Chromium не вклалось у ${Math.round(CHROMIUM_DOWNLOAD_TIMEOUT_MS / 1000)}с`,
     );
+
+    // executablePath() повертає /tmp/chromium одразу, щойно ФАЙЛ існує,
+    // не розпаковуючи більше нічого. На теплому інстансі, де бінарник
+    // лишився від попереднього деплою (без бібліотек), це означало б
+    // вічне `libnss3.so: cannot open shared object file`. Тому
+    // перевіряємо бібліотеки окремо й, якщо їх немає, прибираємо
+    // бінарник і просимо розпакувати все заново — цього разу вже з
+    // виставленою підказкою про рантайм.
+    if ((await fileSizeOrZero(`${expectedLibDir}/libnss3.so`)) === 0) {
+      await removeQuietly(EXTRACTED_CHROMIUM_PATH);
+      executablePath = await withTimeout(
+        chromium.executablePath(haveLocalPack ? packDir : packUrl),
+        CHROMIUM_DOWNLOAD_TIMEOUT_MS,
+        `повторне розпакування Chromium не вклалось у ${Math.round(CHROMIUM_DOWNLOAD_TIMEOUT_MS / 1000)}с`,
+      );
+      if ((await fileSizeOrZero(`${expectedLibDir}/libnss3.so`)) === 0) {
+        return {
+          kind: 'unavailable',
+          diagnostic: `системні бібліотеки Chromium не розпакувались у ${expectedLibDir} (очікувався libnss3.so) — без них браузер не стартує`,
+        };
+      }
+    }
 
     // Бібліотека вважає бінарник готовим за самою наявністю файлу, без
     // перевірки розміру, а розпаковує його потоком — тобто обірване
@@ -262,7 +323,7 @@ async function buildBrowserLaunchPlan(): Promise<BrowserLaunchPlan> {
       // crashed на найпотрібнішому місці.
       args: [...chromium.args],
       headless: chromium.headless,
-      source: '@sparticuz/chromium-min (serverless)',
+      source: `@sparticuz/chromium-min (serverless, ${expectedLibDir})`,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
