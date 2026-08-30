@@ -448,6 +448,81 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   ]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+
+// ---- Функції, що виконуються у контексті САМОЇ СТОРІНКИ ----
+//
+// Ці дві функції серіалізуються й виконуються в браузері, тож усе, чим
+// вони користуються, має бути всередині них: жодних імпортів, констант
+// чи типів із цього модуля тут не видно.
+
+// Прокрутка до низу кроками, щоб спрацював lazy-load. Обмежена і за
+// висотою, і за кількістю кроків: на нескінченних стрічках інакше
+// можна крутити вічно.
+function scrollThroughPage(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let scrolled = 0;
+    let steps = 0;
+    const step = () => {
+      window.scrollBy(0, window.innerHeight);
+      scrolled += window.innerHeight;
+      steps++;
+      if (steps >= 12 || scrolled >= document.body.scrollHeight || scrolled > 12000) {
+        window.scrollTo(0, 0);
+        return resolve();
+      }
+      setTimeout(step, 120);
+    };
+    step();
+  });
+}
+
+// Збір кандидатів із живого DOM, у порядку надійності.
+function collectImageCandidates(): string[] {
+  const out: string[] = [];
+  const add = (value: string | null | undefined) => {
+    if (!value) return;
+    if (value.startsWith('data:')) return;
+    try {
+      const absolute = new URL(value, document.baseURI).toString();
+      if (!out.includes(absolute)) out.push(absolute);
+    } catch {
+      /* не URL — пропускаємо */
+    }
+  };
+
+  // 1. Метадані: те, що сайт САМ призначив для соцмереж.
+  for (const selector of [
+    'meta[property="og:image"]',
+    'meta[property="og:image:secure_url"]',
+    'meta[name="twitter:image"]',
+    'meta[name="twitter:image:src"]',
+    'meta[itemprop="image"]',
+  ]) {
+    add(document.querySelector(selector)?.getAttribute('content'));
+  }
+  add(document.querySelector('link[rel="image_src"]')?.getAttribute('href'));
+
+  // 2. Реально завантажені картинки — за СПРАВЖНІМ розміром, більші
+  //    попереду. naturalWidth знає лише браузер; саме через відсутність
+  //    цього знання розбір атрибутів width/height і промахувався.
+  const loaded = Array.from(document.images)
+    .filter((img) => img.currentSrc && img.naturalWidth >= 200 && img.naturalHeight >= 200)
+    .filter((img) => !/logo|icon|favicon|sprite|avatar|placeholder/i.test(img.currentSrc))
+    .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight);
+  for (const img of loaded) add(img.currentSrc);
+
+  // 3. Ліниві картинки, які так і не завантажились: беремо те, що
+  //    сайт приготував в атрибутах.
+  for (const img of Array.from(document.querySelectorAll('img'))) {
+    for (const attr of ['data-src', 'data-original', 'data-lazy-src', 'data-echo']) {
+      const value = img.getAttribute(attr);
+      if (value && !/logo|icon|favicon|sprite|avatar|placeholder/i.test(value)) add(value);
+    }
+  }
+
+  return out;
+}
+
 async function fetchOgImageWithBrowser(pageUrl: string): Promise<{ imageUrl: string | null; diagnostic: string }> {
   const plan = await resolveBrowserLaunchPlan();
   if (plan.kind === 'unavailable') {
@@ -484,8 +559,30 @@ async function fetchOgImageWithBrowser(pageUrl: string): Promise<{ imageUrl: str
     );
     await new Promise((resolve) => setTimeout(resolve, 2_000));
 
+    // Прокручуємо сторінку перед тим, як щось із неї брати.
+    //
+    // АУДИТ 30.08.2026 — реальний прогін по mev.gov.ua: браузер підняв
+    // сторінку успішно, віддав 59 616 байт справжнього HTML (не
+    // челлендж — той короткий), і жоден селектор не спрацював. Для
+    // новинної сторінки урядового сайту «жодної картинки» — неправда;
+    // правда в тому, що сучасні CMS вантажать зображення ліниво: у
+    // розмітці стоїть data-src, а справжній src з'являється лише коли
+    // картинка потрапляє у в'юпорт. Ілюстрація новини лежить нижче
+    // згину, IntersectionObserver для неї не спрацьовує, і в
+    // page.content() її просто немає.
+    await page.evaluate(scrollThroughPage).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+
+    // Питаємо саму сторінку, а не регулярки по HTML. У нас у руках
+    // справжній браузер: він знає, які картинки РЕАЛЬНО завантажились і
+    // якого вони насправді розміру (naturalWidth), тоді як розбір
+    // атрибутів width/height — здогадка, яка й підвела на mev.gov.ua.
+    const domCandidates = (await page.evaluate(collectImageCandidates).catch(() => [])) as string[];
+
+    // HTML-розбір лишається другим ешелоном: він бачить те, до чого DOM
+    // не дійшов (data-src у картинок, які так і не завантажились).
     const html = await page.content();
-    const candidates = extractImageCandidates(html);
+    const candidates = [...new Set([...domCandidates, ...extractImageCandidates(html)])].slice(0, MAX_IMAGE_CANDIDATES);
     if (candidates.length === 0) {
       return { imageUrl: null, diagnostic: `headless (${plan.source}): HTML ${html.length}б отримано, жоден із селекторів не спрацював (можливо, челлендж не пройдено навіть так)` };
     }
@@ -560,11 +657,29 @@ function extractImageCandidates(html: string): string[] {
   // скріншоту, не для banner-зображення самої програми).
   const imgTags = html.match(/<img\b[^>]*>/gi) ?? [];
   for (const tag of imgTags) {
-    const srcMatch = tag.match(/\bsrc=["']([^"']+)["']/i);
-    if (!srcMatch) continue;
-    const src = srcMatch[1];
+    // АУДИТ 30.08.2026 — раніше бралось лише `src`. Сучасні CMS
+    // (mev.gov.ua серед них) вантажать картинки ліниво: у розмітці
+    // стоїть data-src або srcset, а `src` або порожній, або веде на
+    // прозорий заглушковий gif. Через це на сторінці з нормальною
+    // ілюстрацією не знаходилось НІЧОГО.
+    // Порядок саме такий: ліниві атрибути ПЕРЕД `src`, не навпаки.
+    // Перевірено стендом: коли обидва є, `src` — це прозора заглушка
+    // 1×1, а справжня картинка лежить у data-src. Пріоритет `src`
+    // давав саме заглушку, і вона проходила всі подальші перевірки
+    // (це ж валідний GIF зі статусом 200).
+    const lazyMatch =
+      tag.match(/\bdata-src=["']([^"']+)["']/i) ??
+      tag.match(/\bdata-original=["']([^"']+)["']/i) ??
+      tag.match(/\bdata-lazy-src=["']([^"']+)["']/i);
+    // srcset: беремо найперший URL зі списку "url 320w, url 640w".
+    const srcsetMatch = tag.match(/\b(?:data-)?srcset=["']([^"']+)["']/i);
+    const src =
+      lazyMatch?.[1] ??
+      srcsetMatch?.[1]?.split(',')[0]?.trim().split(/\s+/)[0] ??
+      tag.match(/\bsrc=["']([^"']+)["']/i)?.[1];
+    if (!src) continue;
 
-    if (/logo|icon|favicon|sprite|avatar/i.test(src)) continue;
+    if (/logo|icon|favicon|sprite|avatar|placeholder/i.test(src)) continue;
 
     const widthMatch = tag.match(/\bwidth=["']?(\d+)/i);
     const heightMatch = tag.match(/\bheight=["']?(\d+)/i);
@@ -612,6 +727,19 @@ async function imageUrlUsable(imageUrl: string): Promise<{ ok: boolean; reason: 
     if (res.status === 404 || res.status === 410) return { ok: false, reason: `HTTP ${res.status}` };
     const contentType = res.headers.get('content-type') ?? '';
     if (/^\s*text\//i.test(contentType)) return { ok: false, reason: `content-type ${contentType} — це сторінка, не картинка` };
+
+    // Повний розмір файлу. При Range-запиті content-length дорівнює 1,
+    // тож справжній розмір беремо з content-range ("bytes 0-0/43").
+    const totalBytes = Number(
+      res.headers.get('content-range')?.split('/')[1] ?? res.headers.get('content-length') ?? NaN,
+    );
+    // Прозорі заглушки lazy-load — це GIF 1×1 на 43 байти. Жодна
+    // реальна ілюстрація новини не важить менше кілобайта, тож поріг
+    // відсікає саме заглушки й нічого корисного.
+    if (Number.isFinite(totalBytes) && totalBytes > 0 && totalBytes < 1024) {
+      return { ok: false, reason: `лише ${totalBytes} байт — це заглушка, не ілюстрація` };
+    }
+
     return { ok: true, reason: `HTTP ${res.status}${contentType ? `, ${contentType}` : ''}` };
   } catch (err) {
     return { ok: false, reason: describeFetchError(err) };
