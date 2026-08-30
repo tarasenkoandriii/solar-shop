@@ -68,22 +68,71 @@ async function fetchOgImageLight(
       };
     }
 
-    const raw = extractImageFromHtml(html);
-    if (!raw) {
+    const candidates = extractImageCandidates(html);
+    if (candidates.length === 0) {
       return { imageUrl: null, diagnostic: `HTML ${html.length}б отримано, жоден із селекторів не спрацював`, needsHeadlessBrowser: false };
     }
 
-    try {
-      return { imageUrl: new URL(raw, pageUrl).toString(), diagnostic: 'OK', needsHeadlessBrowser: false };
-    } catch {
-      return raw.startsWith('http')
-        ? { imageUrl: raw, diagnostic: 'OK (без резолву — вже абсолютний)', needsHeadlessBrowser: false }
-        : { imageUrl: null, diagnostic: `знайдено "${raw}", але не вдалося перетворити на абсолютний URL`, needsHeadlessBrowser: false };
-    }
+    const picked = await firstUsableImage(candidates, pageUrl);
+    // Якщо кандидати були, але всі биті — це вже не привід піднімати
+    // браузер: розмітку ми прочитали успішно, проблема в самих файлах.
+    return { imageUrl: picked.imageUrl, diagnostic: picked.diagnostic, needsHeadlessBrowser: false };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { imageUrl: null, diagnostic: `запит провалився: ${message}`, needsHeadlessBrowser: false };
+    // АУДИТ 30.08.2026 — реальна скарга з проду: 5-7-9.gov.ua віддавав
+    // рівно `запит провалився: fetch failed` і на цьому все закінчувалось.
+    //
+    // Дві окремі помилки в трьох рядках.
+    //
+    // 1. `fetch failed` — це ГЕНЕРИЧНА обгортка undici; справжня причина
+    //    (ECONNRESET, EPROTO, помилка сертифіката, таймаут) лежить у
+    //    err.cause, і саме вона тут викидалась. Повідомлення було
+    //    марним: за ним неможливо ні зрозуміти, ні полагодити.
+    // 2. needsHeadlessBrowser: false — тобто на збої РІВНЯ З'ЄДНАННЯ ми
+    //    браузер не пробували взагалі. А це рівно той клас випадків,
+    //    де справжній браузер має шанс: інший TLS-стек, інший набір
+    //    шифрів, ALPN/HTTP2, поблажливіше ставлення до неповного
+    //    ланцюга сертифікатів. Українські урядові й банківські сайти —
+    //    типові носії саме таких конфігурацій. Порівняйте: bdf.gov.ua у
+    //    тому ж прогоні картинку віддав, тобто gov.ua як такий не
+    //    заблокований.
+    //
+    // Не ескалюємо лише там, де браузер точно не допоможе: не
+    // резолвиться ім'я (браузер піде до того самого DNS).
+    const detail = describeFetchError(err);
+    const hopelessDns = /ENOTFOUND|EAI_AGAIN/i.test(detail);
+    return {
+      imageUrl: null,
+      diagnostic: `запит провалився: ${detail}`,
+      needsHeadlessBrowser: !hopelessDns,
+    };
   }
+}
+
+// undici ховає справжню причину у ланцюжку `cause`, іноді на два рівні
+// вглиб (`fetch failed` → `AggregateError` → `Error: certificate has
+// expired`). Розгортаємо весь ланцюг, а не лише верхнє повідомлення.
+function describeFetchError(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current; depth++) {
+    if (current instanceof Error) {
+      const code = (current as NodeJS.ErrnoException).code;
+      parts.push(code ? `${current.message} (${code})` : current.message);
+      // AggregateError (напр. коли перебираються всі адреси хоста)
+      // тримає окремі причини в `errors`, не в `cause`.
+      const aggregated = (current as AggregateError).errors;
+      if (Array.isArray(aggregated) && aggregated.length > 0) {
+        current = aggregated[0];
+        continue;
+      }
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  // Дедуплікація: undici нерідко повторює той самий текст на двох рівнях.
+  return [...new Set(parts)].join(' ← ') || 'невідома помилка';
 }
 
 // Прапорці для системного Chromium у Docker-образі.
@@ -436,18 +485,16 @@ async function fetchOgImageWithBrowser(pageUrl: string): Promise<{ imageUrl: str
     await new Promise((resolve) => setTimeout(resolve, 2_000));
 
     const html = await page.content();
-    const raw = extractImageFromHtml(html);
-    if (!raw) {
+    const candidates = extractImageCandidates(html);
+    if (candidates.length === 0) {
       return { imageUrl: null, diagnostic: `headless (${plan.source}): HTML ${html.length}б отримано, жоден із селекторів не спрацював (можливо, челлендж не пройдено навіть так)` };
     }
 
-    try {
-      return { imageUrl: new URL(raw, pageUrl).toString(), diagnostic: 'OK (через headless-браузер)' };
-    } catch {
-      return raw.startsWith('http')
-        ? { imageUrl: raw, diagnostic: 'OK (через headless-браузер, без резолву)' }
-        : { imageUrl: null, diagnostic: `headless: знайдено "${raw}", але не вдалося перетворити на абсолютний URL` };
-    }
+    const picked = await firstUsableImage(candidates, pageUrl);
+    return {
+      imageUrl: picked.imageUrl,
+      diagnostic: picked.imageUrl ? `${picked.diagnostic} — через headless-браузер` : `headless: ${picked.diagnostic}`,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Найчастіша причина падіння саме на Vercel — брак пам'яті
@@ -463,7 +510,12 @@ async function fetchOgImageWithBrowser(pageUrl: string): Promise<{ imageUrl: str
   }
 }
 
-function extractImageFromHtml(html: string): string | null {
+function extractImageCandidates(html: string): string[] {
+  const found: string[] = [];
+  const add = (v: string | null | undefined) => {
+    if (v && !found.includes(v)) found.push(v);
+  };
+
   const patterns = [
     /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
     /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
@@ -476,7 +528,7 @@ function extractImageFromHtml(html: string): string | null {
 
   for (const pattern of patterns) {
     const match = html.match(pattern);
-    if (match) return match[1];
+    add(match?.[1]);
   }
 
   const jsonLdBlocks = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) ?? [];
@@ -485,10 +537,10 @@ function extractImageFromHtml(html: string): string | null {
     try {
       const data = JSON.parse(inner) as Record<string, unknown>;
       const image = data.image;
-      if (typeof image === 'string') return image;
-      if (Array.isArray(image) && typeof image[0] === 'string') return image[0];
-      if (image && typeof image === 'object' && 'url' in image && typeof (image as { url: unknown }).url === 'string') {
-        return (image as { url: string }).url;
+      if (typeof image === 'string') add(image);
+      else if (Array.isArray(image) && typeof image[0] === 'string') add(image[0]);
+      else if (image && typeof image === 'object' && 'url' in image && typeof (image as { url: unknown }).url === 'string') {
+        add((image as { url: string }).url);
       }
     } catch {
       continue;
@@ -522,8 +574,73 @@ function extractImageFromHtml(html: string): string | null {
 
     if (src.startsWith('data:')) continue; // inline base64 — не справжнє зображення для завантаження
 
-    return src;
+    add(src);
+    // Кількох великих картинок зі сторінки достатньо; далі вже пішли б
+    // банери-сусіди, а кожен кандидат коштує окремої перевірки.
+    if (found.length >= MAX_IMAGE_CANDIDATES) break;
   }
 
-  return null;
+  return found.slice(0, MAX_IMAGE_CANDIDATES);
+}
+
+// АУДИТ 30.08.2026 — на картці Укргазбанку в адмінці стояла зламана
+// картинка: URL знайшовся і зберігся, але не відкривався. Раніше
+// брався ПЕРШИЙ-ЛІПШИЙ кандидат і зберігався без жодної перевірки —
+// якщо він виявлявся битим, картка лишалась зі зламаним <img>, і
+// повторний «Спарсити фото» щоразу знаходив той самий битий URL.
+//
+// Тепер кандидати збираються списком у порядку надійності
+// (og:image → twitter:image → JSON-LD → перший великий <img>) і
+// беремо ПЕРШИЙ, який реально відкривається.
+const MAX_IMAGE_CANDIDATES = 4;
+
+// Перевірка свідомо м'яка: відкидаємо лише те, що ТОЧНО зламане —
+// мережева помилка, 404/410, або HTML замість картинки (типовий
+// «м'який 404», коли сервер віддає сторінку помилки зі статусом 200).
+// 403 НЕ відкидаємо: це часто захист від хотлінку по Referer, і в
+// браузері користувача така картинка відкриється нормально. Краще
+// зберегти сумнівний URL, ніж відкинути робочий.
+async function imageUrlUsable(imageUrl: string): Promise<{ ok: boolean; reason: string }> {
+  try {
+    // Range 0-0 — качаємо один байт, а не весь файл: нам потрібні лише
+    // статус і content-type.
+    const res = await fetchWithRetry(imageUrl, {
+      retries: 0,
+      timeoutMs: 8_000,
+      headers: { ...BROWSER_HEADERS, Range: 'bytes=0-0' },
+    });
+    if (res.status === 404 || res.status === 410) return { ok: false, reason: `HTTP ${res.status}` };
+    const contentType = res.headers.get('content-type') ?? '';
+    if (/^\s*text\//i.test(contentType)) return { ok: false, reason: `content-type ${contentType} — це сторінка, не картинка` };
+    return { ok: true, reason: `HTTP ${res.status}${contentType ? `, ${contentType}` : ''}` };
+  } catch (err) {
+    return { ok: false, reason: describeFetchError(err) };
+  }
+}
+
+// Перетворює кандидатів на абсолютні URL і повертає перший робочий.
+async function firstUsableImage(
+  candidates: string[],
+  pageUrl: string,
+): Promise<{ imageUrl: string | null; diagnostic: string }> {
+  const rejected: string[] = [];
+  for (const raw of candidates) {
+    let absolute: string;
+    try {
+      absolute = new URL(raw, pageUrl).toString();
+    } catch {
+      if (!raw.startsWith('http')) {
+        rejected.push(`"${raw}" — не вдалося перетворити на абсолютний URL`);
+        continue;
+      }
+      absolute = raw;
+    }
+    const check = await imageUrlUsable(absolute);
+    if (check.ok) return { imageUrl: absolute, diagnostic: `OK (${check.reason})` };
+    rejected.push(`${absolute} — ${check.reason}`);
+  }
+  return {
+    imageUrl: null,
+    diagnostic: rejected.length > 0 ? `жоден кандидат не відкрився: ${rejected.join('; ')}` : 'кандидатів не знайдено',
+  };
 }
